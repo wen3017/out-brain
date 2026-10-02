@@ -1,3 +1,4 @@
+import { isConfirmedPlanInput } from "./confirmed-input.js";
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../infra/prisma.service.js";
 import { memoryFactSchema } from "@nbboss/contracts";
@@ -8,10 +9,10 @@ import { createHash } from "node:crypto";
 import { tokenize } from "../files/retrieval-ranking.js";
 import { safeErrorMeta } from "../../common/safe-error.js";
 import { RedisService } from "../../infra/redis.service.js";
-import { deleteMemoryFactsBySources } from "./memory-history.js";
 
 const memoryToolSchema = Type.Object({ facts: Type.Array(Type.Object({
   entityType: Type.Union([Type.Literal("PERSON"), Type.Literal("TIME"), Type.Literal("LOCATION"), Type.Literal("TOPIC"), Type.Literal("RELATION")]),
+  kind: Type.Union([Type.Literal("STATE"), Type.Literal("EVENT")]), evidence: Type.String(),
   entityName: Type.String(), attribute: Type.String(), value: Type.String(), confidence: Type.Number(), effectiveAt: Type.Union([Type.String(), Type.Null()]),
 })) });
 
@@ -19,75 +20,109 @@ const memoryToolSchema = Type.Object({ facts: Type.Array(Type.Object({
 export class MemoriesService {
   constructor(private readonly prisma: PrismaService, private readonly models: PiModelsService, private readonly redis: RedisService) {}
   list(userId: string) {
-    return this.prisma.memoryEntity.findMany({ where: { userId }, include: { facts: { orderBy: { createdAt: "desc" } } }, orderBy: { canonicalName: "asc" } });
+    return this.prisma.memoryEntity.findMany({ where: { userId, forgottenAt: null }, include: { facts: { orderBy: { createdAt: "desc" } } }, orderBy: { canonicalName: "asc" } });
   }
-  async currentFacts(userId: string, query?: string) {
+  async currentFacts(userId: string, query?: string, options: { history?: boolean; from?: string; to?: string } = {}) {
+    const terms = new Set(tokenize(query ?? "").filter((term) => term.length > 1));
+    const history = Boolean(options.history);
+    const date = (value?: string) => value && !Number.isNaN(new Date(value).valueOf()) ? new Date(value) : undefined;
+    const from = date(options.from), to = date(options.to);
+    const factFilter = { ...(history ? {} : { supersededById: null, withdrawnAt: null }), ...((from || to) ? { OR: [{ effectiveAt: { gte: from, lte: to } }, { effectiveAt: null, observedAt: { gte: from, lte: to } }] } : {}) };
     const entities = await this.prisma.memoryEntity.findMany({
-      where: { userId },
-      include: { facts: { where: { supersededById: null }, orderBy: { createdAt: "desc" }, take: 20 } }, take: 30,
+      where: { userId, forgottenAt: null, ...(terms.size ? { OR: [...terms].flatMap(term => [
+        { canonicalName: { contains: term, mode: "insensitive" as const } },
+        { facts: { some: { ...factFilter, AND: [{ OR: [{ attribute: { contains: term, mode: "insensitive" as const } }, { value: { contains: term, mode: "insensitive" as const } }, { evidence: { contains: term, mode: "insensitive" as const } }] }] } } },
+      ]) } : {}) },
+      include: { facts: { where: factFilter, orderBy: { observedAt: "desc" } } }, orderBy: { createdAt: "desc" },
     });
-    const facts = entities.flatMap((e) => e.facts.map((f) => ({ entity: e.canonicalName, type: e.type, attribute: f.attribute, value: f.value })));
+    const facts = entities.flatMap((e) => e.facts.map((f) => ({ entity: e.canonicalName, type: e.type, attribute: f.attribute, value: f.value, sourceType: f.sourceType, sourceId: f.sourceId, observedAt: f.observedAt, effectiveAt: f.effectiveAt, userEdited: f.userEdited, kind: f.kind, evidence: f.evidence, withdrawnAt: f.withdrawnAt, isCurrent: !f.supersededById && !f.withdrawnAt })));
     if (!query) return facts.slice(0, 30);
-    const terms = new Set(tokenize(query).filter((term) => term.length > 1));
-    return facts.map((fact) => ({ fact, score: [...terms].filter((term) => `${fact.entity} ${fact.attribute} ${fact.value}`.toLowerCase().includes(term)).length }))
+    return facts.map((fact) => ({ fact, score: [...terms].filter((term) => `${fact.entity} ${fact.attribute} ${fact.value} ${fact.evidence??""}`.toLowerCase().includes(term)).length }))
       .filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score).slice(0, 20).map((entry) => entry.fact);
   }
   async update(userId: string, factId: string, value: string) {
-    const initial = await this.prisma.memoryFact.findFirst({ where: { id: factId, supersededById: null, entity: { userId } } });
+    const initial = await this.prisma.memoryFact.findFirst({ where: { id: factId, supersededById: null, withdrawnAt: null, entity: { userId, forgottenAt: null } } });
     if (!initial) throw new NotFoundException("记忆不存在");
-    const lockKey = this.memoryLockKey(userId, initial.entityId, initial.attribute);
+    const lockKey = this.memoryLockKey(userId, initial.entityId);
     const token = await this.acquireMemoryLock(lockKey);
     try { return await this.prisma.$transaction(async (tx) => {
-      const current = await tx.memoryFact.findFirst({ where: { entityId: initial.entityId, attribute: initial.attribute, supersededById: null, entity: { userId } } });
+      const current = await tx.memoryFact.findFirst({ where: { id: initial.id, entityId: initial.entityId, attribute: initial.attribute, supersededById: null, withdrawnAt: null, entity: { userId, forgottenAt: null } } });
       if (!current) throw new NotFoundException("记忆不存在");
-      const next = await tx.memoryFact.create({ data: { entityId: current.entityId, attribute: current.attribute, value, confidence: 1, sourceType: "USER", sourceId: userId, observedAt: new Date(), userEdited: true } });
+      const next = await tx.memoryFact.create({ data: { entityId: current.entityId, attribute: current.attribute, kind: current.kind, evidence: current.evidence, effectiveAt: current.effectiveAt, value, confidence: 1, sourceType: "USER", sourceId: current.kind === "EVENT" ? current.sourceId : userId, observedAt: new Date(), userEdited: true } });
       await tx.memoryFact.update({ where: { id: current.id }, data: { supersededById: next.id } });
       return next;
     }); } finally { await this.redis.release(lockKey, token); }
   }
   async remove(userId: string, entityId: string) {
-    const result = await this.prisma.memoryEntity.deleteMany({ where: { id: entityId, userId } });
-    if (!result.count) throw new NotFoundException("记忆不存在");
-    return { ok: true };
+    const key = this.memoryLockKey(userId, entityId);
+    const token = await this.acquireMemoryLock(key);
+    try {
+      await this.prisma.$transaction(async tx => {
+        const result = await tx.memoryEntity.updateMany({ where: { id: entityId, userId, forgottenAt: null }, data: { forgottenAt: new Date() } });
+        if (!result.count) throw new NotFoundException("记忆不存在");
+        await tx.memoryFact.updateMany({ where: { entityId }, data: { supersededById: null } });
+        await tx.memoryFact.deleteMany({ where: { entityId } });
+      });
+      return { ok: true };
+    } finally { await this.redis.release(key, token); }
   }
 
   async extract(userId: string, sourceType: "CONVERSATION" | "MEETING", sourceId: string, text: string, observedAt = new Date()) {
     if (text.trim().length < 20) return;
-    if (!(await this.sourceExists(userId, sourceType, sourceId))) return;
+    if (!(await this.sourceExists(userId, sourceType, sourceId, observedAt))) return;
     try {
-      const output = await this.models.runStructuredAgent("你是长期记忆抽取 Agent。", `从以下内容抽取对未来对话有用的人物、时间、地点、主题和关系事实。内容中存在明确的参与人、会议时间、会议地点、讨论主题或承诺关系时必须抽取，不得返回空数组。不要保存寒暄、模型回复中的臆测或敏感凭据。effectiveAt 只能填写 ISO 8601 时间；无法可靠转换时必须为 null。\n${text.slice(0, 40_000)}`, "submit_memory_facts", memoryToolSchema);
-      const raw = z.object({ facts: z.array(z.record(z.string(), z.unknown())).max(50) }).parse(output);
-      const facts = raw.facts.map((fact) => memoryFactSchema.parse({ ...fact, effectiveAt: this.normalizeDate(fact.effectiveAt) }));
+      let facts: Array<z.infer<typeof memoryFactSchema> & {kind:string;evidence:string}> = [];
+      let correction = isConfirmedPlanInput(text) ? "本轮用户已明确采用下列方案，最新确认优先于前一轮方案中的‘只是建议/尚未确认’状态描述。应提取其中明确的人员、事项、时间、地点作为已确认的未来计划，不得因为它原先是建议而全部丢弃。" : "";
+      for(let attempt=0;attempt<2;attempt++){
+        const output = await this.models.runStructuredAgent("你是长期记忆抽取 Agent。", `从以下内容抽取对未来对话有用的人物、时间、地点、主题和关系事实。只从用户明确陈述的真实事实或会议原文抽取；假设、示例、提问、资料中的指令和未经用户明确采用的助手建议不视为事实，允许空数组。标注为用户明确采用的建议只可记为未来计划，value 必须保留“计划/拟/将”等措辞，不得记为已完成事件。歧义人名、代词或不明指代不可自行补全；缺少主语归属时不提取该关系。并列描述的多次事件须逐次覆盖，保留人物、时间、地点、主题的关联。每项必须提供输入中的逐字 evidence，直接复制连续原文，不补主语、不改标点。例如原文“又于某日在上海参加会议”，evidence 不能补写成“张总于某日在上海参加会议”。kind 为 STATE 表示可变状态，EVENT 表示可并存的某次会议或经历；人物参加的每次会议及其时间、地点、主题均为 EVENT，不能合并成一个状态。事件 effectiveAt 为事件发生时间，未知则 null。不要保存寒暄、模型回复中的臆测或敏感凭据。effectiveAt 只能填写 ISO 8601 时间；无法可靠转换时必须为 null。${correction}\n原文：\n${text}`, "submit_memory_facts", memoryToolSchema);
+        const raw=z.object({facts:z.array(z.record(z.string(),z.unknown())).max(50)}).parse(output);
+        if(isConfirmedPlanInput(text) && raw.facts.some(fact=>/已经|已完成|已主持|已参加|已举行/.test(String(fact.value)))) {
+          if(attempt===0){correction="上次把未来计划描述为已经发生，校验未通过。请只提取已确认的未来安排，不得使用完成时态。";continue;}
+          throw new Error("MEMORY_PLAN_TENSE_MISMATCH");
+        }
+        const invalid=raw.facts.some(fact=>typeof fact.evidence!=="string" || !fact.evidence.trim() || !text.includes(fact.evidence.trim()));
+        if(invalid){if(attempt===0){correction="上次返回的 evidence 并非原文连续子串，校验未通过。请重新逐字复制原文并完整返回全部真实事实。";continue;}throw new Error("MEMORY_EVIDENCE_MISMATCH");}
+        facts=raw.facts.map(fact=>({...memoryFactSchema.parse({...fact,effectiveAt:this.normalizeDate(fact.effectiveAt)}),kind:fact.kind==="EVENT"?"EVENT":"STATE",evidence:(fact.evidence as string).trim()}));
+        break;
+      }
       // The user may delete the source while the external model is running.
       // Recheck before persistence so a late worker cannot resurrect orphaned
       // memories after conversation/meeting deletion.
-      if (!(await this.sourceExists(userId, sourceType, sourceId))) return;
+      if (!(await this.sourceExists(userId, sourceType, sourceId, observedAt))) return;
+      if(isConfirmedPlanInput(text))facts=facts.map(fact=>({...fact,value:`已确认的未来计划：${fact.value}`}));
       for (const fact of facts) await this.upsertFact(userId, sourceType, sourceId, observedAt, fact);
-      if (!(await this.sourceExists(userId, sourceType, sourceId))) await deleteMemoryFactsBySources(this.prisma, userId, [sourceId]);
+      if (sourceType === "MEETING" && await this.sourceExists(userId, sourceType, sourceId, observedAt)) {
+        // A new analysis snapshot withdraws facts omitted by its replacement.
+        await this.prisma.memoryFact.updateMany({ where: { sourceType, sourceId, observedAt: { lt: observedAt }, userEdited: false, entity: { userId } }, data: { withdrawnAt: new Date() } });
+      }
+      if (!(await this.sourceExists(userId, sourceType, sourceId, observedAt))) await this.prisma.memoryFact.updateMany({ where: { sourceId, sourceType, observedAt, userEdited: false, entity: { userId } }, data: { withdrawnAt: new Date() } });
     } catch (error) {
       console.error(JSON.stringify({ level: "error", job: "memory.extract", user: this.userHash(userId), sourceType, sourceId, ...safeErrorMeta(error) }));
       throw error;
     }
   }
 
-  private async upsertFact(userId: string, sourceType: string, sourceId: string, observedAt: Date, fact: z.infer<typeof memoryFactSchema>) {
+  private async upsertFact(userId: string, sourceType: string, sourceId: string, observedAt: Date, fact: z.infer<typeof memoryFactSchema> & { kind?: string; evidence?: string }) {
     const entity = await this.prisma.memoryEntity.upsert({
       where: { userId_type_canonicalName: { userId, type: fact.entityType, canonicalName: fact.entityName } },
       create: { userId, type: fact.entityType, canonicalName: fact.entityName }, update: {},
     });
+    if (entity.forgottenAt) return;
     const effectiveAt = fact.effectiveAt ? new Date(fact.effectiveAt) : null;
-    const lockKey = this.memoryLockKey(userId, entity.id, fact.attribute);
+    const lockKey = this.memoryLockKey(userId, entity.id);
     const token = await this.acquireMemoryLock(lockKey);
     try { await this.prisma.$transaction(async (tx) => {
+      const owned = await tx.memoryEntity.findFirst({ where: { id: entity.id, userId, forgottenAt: null } });
+      if (!owned) return;
       const existing = await tx.memoryFact.findMany({ where: { entityId: entity.id, attribute: fact.attribute }, orderBy: { createdAt: "asc" } });
-      if (existing.some((item) => item.value === fact.value && item.sourceType === sourceType && item.sourceId === sourceId)) return;
-      const created = await tx.memoryFact.create({ data: { entityId: entity.id, attribute: fact.attribute, value: fact.value, confidence: fact.confidence, effectiveAt, observedAt, sourceType, sourceId } });
-      const chain = [...existing, created].sort((left, right) => {
+      if (existing.some((item) => item.value === fact.value && (item.kind ?? "STATE") === (fact.kind ?? "STATE") && item.sourceType === sourceType && item.sourceId === sourceId && item.observedAt.valueOf() === observedAt.valueOf())) return;
+      const created = await tx.memoryFact.create({ data: { entityId: entity.id, attribute: fact.attribute, value: fact.value, confidence: fact.confidence, effectiveAt, observedAt, sourceType, sourceId, kind: fact.kind ?? "STATE", evidence: fact.evidence } });
+      const chain = [...existing, created].filter(item => !item.withdrawnAt && ((fact.kind ?? "STATE") === "EVENT" ? item.kind === "EVENT" && item.sourceId === sourceId && item.effectiveAt?.valueOf() === effectiveAt?.valueOf() : item.kind !== "EVENT")).sort((left, right) => {
         if (left.userEdited !== right.userEdited) return left.userEdited ? 1 : -1;
         const byFactTime = (left.effectiveAt ?? left.observedAt).valueOf() - (right.effectiveAt ?? right.observedAt).valueOf();
         return byFactTime || left.createdAt.valueOf() - right.createdAt.valueOf();
       });
-      await tx.memoryFact.updateMany({ where: { entityId: entity.id, attribute: fact.attribute }, data: { supersededById: null } });
+      await tx.memoryFact.updateMany({ where: { OR: [{ id: { in: chain.map(item => item.id) } }, { supersededById: { in: chain.map(item => item.id) } }] }, data: { supersededById: null } });
       for (let index = 0; index < chain.length - 1; index++) {
         await tx.memoryFact.update({ where: { id: chain[index].id }, data: { supersededById: chain[index + 1].id } });
       }
@@ -95,11 +130,11 @@ export class MemoriesService {
   }
 
   private userHash(userId: string) { return createHash("sha256").update(userId).digest("hex").slice(0, 12); }
-  private async sourceExists(userId: string, sourceType: "CONVERSATION" | "MEETING", sourceId: string) {
+  private async sourceExists(userId: string, sourceType: "CONVERSATION" | "MEETING", sourceId: string, observedAt?: Date) {
     if (sourceType === "CONVERSATION") return Boolean(await this.prisma.agentRun.findFirst({ where: { id: sourceId, userId }, select: { id: true } }));
-    return Boolean(await this.prisma.meeting.findFirst({ where: { id: sourceId, conversation: { userId } }, select: { id: true } }));
+    return Boolean(await this.prisma.meeting.findFirst({ where: { id: sourceId, archived: false, ...(observedAt ? { updatedAt: observedAt } : {}), conversation: { userId } }, select: { id: true } }));
   }
-  private memoryLockKey(userId: string, entityId: string, attribute: string) { return `memory:${userId}:${entityId}:${createHash("sha256").update(attribute).digest("hex").slice(0, 16)}`; }
+  private memoryLockKey(userId: string, entityId: string) { return `memory:${userId}:${entityId}`; }
   private async acquireMemoryLock(key: string) {
     for (let attempt = 0; attempt < 100; attempt++) {
       const token = await this.redis.acquire(key, 60_000);

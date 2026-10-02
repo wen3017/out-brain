@@ -2,8 +2,9 @@
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { MessageSquarePlus, CheckSquare, Brain, LogOut, Sparkles } from "lucide-vue-next";
 import { useAuthStore } from "./stores/auth";
+import { confirmUnsavedChanges } from "./unsaved-changes";
 const auth = useAuthStore(); const route = useRoute(); const router = useRouter();
-async function logout() { await auth.logout(); router.push("/login"); }
+async function logout() { if(!confirmUnsavedChanges())return;await auth.logout(); router.push("/login"); }
 </script>
 
 <template>

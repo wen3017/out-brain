@@ -34,12 +34,12 @@ export async function deleteMemoryFactsBySources(db: MemoryDb, userId: string, s
     await db.memoryFact.deleteMany({ where: { entityId, sourceId: { in: sourceIds }, userEdited: false } });
     const remaining = ordered.filter((fact) => fact.userEdited || !sourceIds.includes(fact.sourceId));
     const byAttribute = new Map<string, typeof remaining>();
-    for (const fact of remaining) byAttribute.set(fact.attribute, [...(byAttribute.get(fact.attribute) ?? []), fact]);
+    for (const fact of remaining.filter(fact => !fact.withdrawnAt)) { const key = fact.kind === "EVENT" ? `${fact.attribute}:event:${fact.sourceId}:${fact.effectiveAt?.toISOString()??"unknown"}` : fact.attribute; byAttribute.set(key, [...(byAttribute.get(key) ?? []), fact]); }
     for (const chain of byAttribute.values()) {
       for (let index = 0; index < chain.length - 1; index++) {
         await db.memoryFact.update({ where: { id: chain[index].id }, data: { supersededById: chain[index + 1].id } });
       }
     }
   }
-  if (entityIds.length) await db.memoryEntity.deleteMany({ where: { id: { in: entityIds }, userId, facts: { none: {} } } });
+  if (entityIds.length) await db.memoryEntity.deleteMany({ where: { id: { in: entityIds }, userId, forgottenAt: null, facts: { none: {} } } });
 }

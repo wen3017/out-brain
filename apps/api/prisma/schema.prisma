@@ -39,6 +39,7 @@ enum ProcessingStatus {
   PROCESSING
   READY
   FAILED
+  PARTIAL
 }
 
 enum RunStatus {
@@ -74,8 +75,10 @@ enum MemoryType {
 enum DeliveryStatus {
   DISABLED
   PENDING
+  SENDING
   SENT
   FAILED
+  CANCELLED
 }
 
 enum PresentationStatus {
@@ -94,6 +97,7 @@ model User {
   refreshTokens RefreshToken[]
   todos         Todo[]
   memories      MemoryEntity[]
+  memoryExtractions MemoryExtraction[]
   agentRuns     AgentRun[]
   files         FileAsset[]
 }
@@ -214,6 +218,9 @@ model DocumentPage {
   fileId   String
   pageNo   Int
   text     String    @db.Text
+  extractionMethod String @default("TEXT")
+  qualityStatus String @default("OK")
+  qualityMessage String?
   file     FileAsset @relation(fields: [fileId], references: [id], onDelete: Cascade)
   @@unique([fileId, pageNo])
 }
@@ -240,6 +247,7 @@ model Meeting {
   location       String?
   analysis       Json
   analysisVersion Int        @default(1)
+  archived       Boolean     @default(false)
   status         ProcessingStatus @default(READY)
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
@@ -268,9 +276,12 @@ model Risk {
   severity    RiskSeverity
   description String       @db.Text
   evidence    Json
+  fingerprint String?
+  active      Boolean      @default(true)
   createdAt   DateTime     @default(now())
   meeting     Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   todos       Todo[]
+  @@unique([meetingId, fingerprint])
 }
 
 model Todo {
@@ -284,6 +295,8 @@ model Todo {
   dueAt       DateTime?
   status      TodoStatus @default(PENDING)
   aiGenerated Boolean    @default(true)
+  editedFields String[]  @default([])
+  modelSuggestion Json?
   idempotencyKey String  @unique
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -298,10 +311,27 @@ model MemoryEntity {
   userId        String
   type          MemoryType
   canonicalName String
+  forgottenAt   DateTime?
   createdAt     DateTime     @default(now())
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   facts         MemoryFact[]
   @@unique([userId, type, canonicalName])
+}
+
+model MemoryExtraction {
+  id          String @id @default(uuid())
+  userId      String
+  sourceType  String
+  sourceId    String
+  observedAt  DateTime
+  text        String @db.Text
+  status      ProcessingStatus @default(PENDING)
+  errorMessage String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, sourceType, sourceId, observedAt])
+  @@index([userId, status])
 }
 
 model MemoryFact {
@@ -315,6 +345,9 @@ model MemoryFact {
   sourceId       String
   observedAt     DateTime     @default(now())
   userEdited     Boolean      @default(false)
+  kind           String       @default("STATE")
+  evidence       String?      @db.Text
+  withdrawnAt    DateTime?
   supersededById String?      @unique
   createdAt      DateTime     @default(now())
   entity         MemoryEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
@@ -365,11 +398,14 @@ model PresentationVersion {
 model EmailDelivery {
   id              String         @id @default(uuid())
   meetingId       String
+  idempotencyKey  String?        @unique
+  payload         Json?
   recipientMasked String
   status          DeliveryStatus
   attempts        Int            @default(0)
   errorCode       String?
   sentAt          DateTime?
   createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
   meeting         Meeting        @relation(fields: [meetingId], references: [id], onDelete: Cascade)
 }

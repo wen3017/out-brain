@@ -1,6 +1,8 @@
 import { Controller, Get } from "@nestjs/common";
 import { PrismaService } from "./infra/prisma.service.js";
 import { RedisService } from "./infra/redis.service.js";
+import { SearchService } from "./modules/search/search.service.js";
+import { MailService } from "./modules/mail/mail.service.js";
 
 @Controller("health")
 export class HealthController {
@@ -13,14 +15,17 @@ export class HealthController {
   async ready() {
     await this.prisma.$queryRaw`SELECT 1`;
     await this.redis.ping();
-    return { status: "ready", database: "ok", redis: "ok" };
+    const heartbeat=await this.redis.client.get("nbboss:worker:heartbeat");
+    return { status: "ready", database: "ok", redis: "ok", worker: heartbeat ? "online" : "offline", workerHeartbeat: heartbeat };
   }
 
   @Get("capabilities")
   capabilities() {
     return {
-      search: process.env.SEARCH_ENABLED === "true" && (process.env.SEARCH_PROVIDER === "mock" || Boolean(process.env.SEARCH_API_KEY)),
-      smtp: process.env.SMTP_ENABLED === "true" && (process.env.SMTP_PROVIDER === "mock" || Boolean(process.env.SMTP_HOST && process.env.SMTP_TO)),
+      search: new SearchService().available(),
+      smtp: new MailService(this.prisma).available(),
+      ocr: process.env.OCR_ENABLED !== "false",
+      reasons: { search: new SearchService().available() ? null : "请配置并启用 Tavily 搜索服务", smtp: new MailService(this.prisma).available() ? null : "请配置 SMTP 发件服务与收件人" },
       embedding: Boolean(process.env.EMBEDDING_BASE_URL && process.env.EMBEDDING_API_KEY && process.env.EMBEDDING_MODEL),
       vision: process.env.VISION_ENABLED === "true" && Boolean(process.env.VISION_BASE_URL && process.env.VISION_API_KEY && process.env.VISION_MODEL),
     };

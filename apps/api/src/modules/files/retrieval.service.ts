@@ -12,7 +12,7 @@ export class RetrievalService {
 
   async search(userId: string, conversationId: string, query: string, limit = 8): Promise<RetrievedChunk[]> {
     const chunks = await this.prisma.documentChunk.findMany({
-      where: { file: { userId, conversationId, status: "READY", kind: "PDF" } },
+      where: { file: { userId, conversationId, status: { in: ["READY","PARTIAL"] }, kind: "PDF" } },
       include: { file: { select: { id: true, originalName: true } } },
     });
     const documents = chunks.map((chunk) => ({ id: chunk.id, fileId: chunk.file.id, fileName: chunk.file.originalName, pageStart: chunk.pageStart, pageEnd: chunk.pageEnd, content: chunk.content }));
@@ -33,7 +33,7 @@ export class RetrievalService {
                1 - (c."embedding" <=> ${vector}::vector) AS score
         FROM "DocumentChunk" c JOIN "FileAsset" f ON f.id = c."fileId"
         WHERE f."userId" = ${userId} AND f."conversationId" = ${conversationId}
-          AND f.status = 'READY' AND f.kind = 'PDF' AND c.embedding IS NOT NULL
+          AND f.status IN ('READY','PARTIAL') AND f.kind = 'PDF' AND c.embedding IS NOT NULL
         ORDER BY c.embedding <=> ${vector}::vector LIMIT ${limit * 2}`;
       return reciprocalRankFuse([lexical.slice(0, limit * 2), semantic], (item) => `${item.fileId}:${item.pageStart}:${item.content.slice(0, 30)}`)
         .map(({ value, score }) => ({ ...value, score })).slice(0, limit);

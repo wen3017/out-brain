@@ -9,6 +9,7 @@ import { PresentationsService } from "./presentations.service.js";
 @Controller() @UseGuards(JwtAuthGuard)
 export class PresentationsController {
   constructor(private readonly presentations: PresentationsService) {}
+  @Post("presentations/:id/retry") retry(@CurrentUser() user: AuthUser, @Param("id") id: string) { return this.presentations.retry(user.id, id); }
   @Post("conversations/:conversationId/presentations")
   generate(@CurrentUser() user: AuthUser, @Param("conversationId") id: string, @Body() body: unknown) {
     const { prompt, idempotencyKey } = z.object({ prompt: z.string().trim().min(1).max(10_000), idempotencyKey: z.string().uuid().optional() }).parse(body);

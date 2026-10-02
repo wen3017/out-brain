@@ -1,5 +1,32 @@
 # NBBOSS AI 外脑
 
+## 2026-09-30 功能完善
+
+- 图片型 PDF 自动使用本地中文/英文 OCR，保留页码与提取方式；小字、装饰字体可能有误差，页面提示核对原页。第一次使用需联网下载语言包，Windows 启动器统一缓存到 `data/ocr-cache`，之后可离线识别。
+- 会议重分析保留会议与待办记录，按来源证据匹配风险；人工修改和完成状态保留。未再检出的风险标为待复核，分组变化产生的历史会议保留展示，不再静默删除。
+- 邮件通过数据库持久化任务由 Worker 独立投递，失败可在会议面板重试；显示“已提交 SMTP”而不是保证收件。进程中断导致结果不确定时，应先检查收件箱再重试。
+- 对话可读取本次会议并检索跨会话记忆；PPT 优先使用最新消息及相关资料。聊天创建的后台任务会自动刷新状态，文件解析和 PPT 失败均可重试。
+
+### 网易 163 邮箱配置（项目外保存）
+
+1. 登录 [163 邮箱](https://mail.163.com/)，在设置中的 POP3/SMTP/IMAP 服务处启用 SMTP 并生成授权码。使用授权码，不使用网页登录密码。操作说明可参考 [华为官方的 163 授权码指引](https://consumer.huawei.com/cn/support/content/zh-cn15872099/)。
+2. 在项目根目录执行：
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/configure-services.ps1 -Service smtp
+   ```
+
+3. 按提示输入发件邮箱、收件邮箱和授权码。测试时可把收件邮箱填写为自己的邮箱。脚本预设 `smtp.163.com:465`，只保存配置，不发送邮件。
+4. 运行 `stop.cmd`，再运行 `start.cmd`。配置生效后，可在会议产物区重试投递；请检查实际收件箱和垃圾邮件目录。
+
+授权码以 Windows DPAPI 加密保存在 `%LOCALAPPDATA%\NBBOSS\services.json`，只由当前 Windows 用户解密，并只注入 API/Worker。现有百炼配置继续保存在独立的 `provider.json`，不会被覆盖。
+
+### 联网搜索与测试
+
+没有 Tavily 密钥时页面保持“联网未配置”，不会以 Mock 冒充真实搜索。取得密钥后运行同一配置脚本并使用 `-Service search`，再重启。
+
+验证命令：`pnpm typecheck`、`pnpm test`、`pnpm test:integration`、`pnpm test:e2e`。集成与页面测试需先启动本地服务；Mock 搜索测试不代表真实搜索验收。数据库新增迁移由 `start.cmd` 自动应用。
+
 NBBOSS AI 外脑是一个面向内部员工的多用户 AI 工作台。项目基于 Node.js/TypeScript，使用 Pi Agent Runtime 统一承载多轮模型执行、工具调用和流式事件，并提供会话级 PDF RAG、会议风险闭环、长期记忆、联网搜索和可编辑 PPTX。
 
 - 产品与架构基线：[`doc/adr/0001-nbboss-ai-brain-architecture.md`](doc/adr/0001-nbboss-ai-brain-architecture.md)
@@ -286,6 +313,70 @@ docker compose down -v
 请勿在需要保留演示数据时使用 `-v`。
 
 ## 7. 本地开发
+
+### 7.0 Windows 一键运行（无需 Docker）
+
+在 Windows PowerShell 中，先安装 Node.js 24、pnpm 11.22.0，以及带有
+“使用 C++ 的桌面开发”组件的 Visual Studio 2022（首次编译 pgvector 需要）。
+配置脚本使用 Windows 自带的 `curl.exe` 和 `tar.exe`，无需安装系统服务。
+
+首次配置可双击项目根目录的 `setup.cmd`，也可执行：
+
+```powershell
+pnpm setup:local
+```
+
+脚本会安装项目依赖，并将 PostgreSQL 16.15、pgvector 0.8.6 和 Redis 7.2.16
+配置到项目的 `.local` 目录。PostgreSQL 使用
+[EDB 官方发行包](https://www.enterprisedb.com/download-postgresql-binaries)，
+pgvector 从[官方源码](https://github.com/pgvector/pgvector)编译，
+Redis 使用 [redis-windows 社区维护的 Windows 便携构建](https://github.com/redis-windows/redis-windows)，
+用于本地开发。下载文件均校验固定 SHA256。
+
+首次运行会生成根目录 `.env`，使用随机数据库密码和两个不同的 JWT 密钥；
+已有 `.env` 会保留。该方式的 `DATABASE_URL` 和 `REDIS_URL` 必须指向本机，
+不要保留 Compose 模板中的 `postgres`、`redis` 主机名。
+
+编辑根目录 `.env`，填写 `LLM_API_KEY`，并确认 `LLM_BASE_URL`、`LLM_MODEL`
+与实际账号一致。未填 Key 时可以验证页面、注册登录和基础服务，模型功能无法使用。
+
+Windows 启动器也支持项目目录外的 `%LOCALAPPDATA%\NBBOSS\provider.json`：
+其中 `baseUrl`、`model` 指定模型服务，`apiKeyDpapi` 保存由当前 Windows 用户通过
+`ConvertFrom-SecureString`（不指定 `-Key`）生成的加密密钥。
+存在此配置时，它会覆盖 API 和 Worker 的模型配置；密钥仅在启动时注入这两个进程，
+不会写入项目 `.env`，也不会注入前端或构建进程。修改此配置后先停止再启动项目。
+DPAPI 加密配置不能直接拷贝给其他 Windows 用户使用。
+
+以后双击 `start.cmd`，或运行：
+
+```powershell
+pnpm start:local
+```
+
+启动脚本会构建共享模块和 API、应用数据库迁移，并在后台启动 PostgreSQL、Redis、
+API、Worker 和 Vite；就绪后打开 <http://localhost:3000>。首次进入页面需要注册账号。
+关闭启动窗口或浏览器不会停止后台服务。默认端口为 3000、3001、5432、6379；
+若端口已被其他程序占用，脚本会报错，不会停止或接管其他程序。
+
+停止时双击 `stop.cmd`，或运行：
+
+```powershell
+pnpm stop:local
+```
+
+停止会保留数据库、Redis 和上传数据。修改 `.env` 或 API 源码后需要先停止再启动；
+前端源码由 Vite 自动热更新。重复执行启动命令会复用已由本项目启动的服务。
+
+路径说明：
+
+- 配置：`.env`（不要提交或分享真实密钥）
+- 服务日志：`.local/logs/`（API/Worker/Web 各有 `stdout.log`、`stderr.log`）
+- 数据库：`.local/data/postgres/`
+- Redis 数据：`.local/data/redis/`
+- 上传和生成文件：`data/uploads/`
+
+`.local`、`.env` 和数据目录均已排除 Git 提交；`.local` 也已排除 Docker 构建。
+不要删除 `.local/data`，其中包含本地业务数据。
 
 ### 7.1 安装依赖
 

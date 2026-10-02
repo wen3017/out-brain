@@ -4,3 +4,6 @@
 .mini-slide{position:relative;padding:0}.mini-element{position:absolute;overflow:hidden;font-size:2px;line-height:1.1;white-space:pre-wrap}
 .tool-activity{margin:-10px 0 22px 42px;display:flex;flex-wrap:wrap;gap:7px}.tool-state{display:flex;align-items:center;gap:6px;border:1px solid #e3e1ef;background:#faf9ff;border-radius:8px;padding:6px 9px;font-size:11px;color:#747788}.tool-state b{color:#50456f}.tool-dot{width:7px;height:7px;border-radius:50%;background:#8b5cf6}.tool-state.running .tool-dot{animation:tool-pulse 1s ease-in-out infinite}.tool-state.completed .tool-dot{background:#22a06b}.tool-state.failed .tool-dot{background:#d14343}@keyframes tool-pulse{50%{opacity:.3;transform:scale(.75)}}
 .search-sources{margin-top:10px;border-left:2px solid #8b5cf6;background:#faf9ff;padding:8px 10px;display:grid;gap:4px;font-size:12px}.search-sources b{color:#514370}.search-sources small{color:#858899}.search-sources a{color:#5b43d2;text-decoration:none;overflow-wrap:anywhere}.search-sources a:hover{text-decoration:underline}
+
+/* PPT coordinates are inches and font sizes are points; scale both with the canvas. */
+.slide-canvas{container-type:inline-size}.slide-element textarea{line-height:1.2;overflow:auto}.artifact-card details small{white-space:normal}.file-chip.partial{color:#986600}

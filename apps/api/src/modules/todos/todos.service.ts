@@ -18,7 +18,8 @@ export class TodosService {
   async update(userId: string, id: string, data: Record<string, unknown>) {
     const existing = await this.prisma.todo.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundException("待办不存在");
-    return this.prisma.todo.update({ where: { id }, data: data as never });
+    const editedFields = [...new Set([...(existing.editedFields ?? []), ...Object.keys(data).filter(key => ["title","description","owner","dueAt"].includes(key) && data[key] !== undefined)])];
+    return this.prisma.todo.update({ where: { id }, data: { ...data, editedFields } as never });
   }
   async remove(userId: string, id: string) {
     const result = await this.prisma.todo.deleteMany({ where: { id, userId } });

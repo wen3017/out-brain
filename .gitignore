@@ -19,6 +19,7 @@ test-results/
 data/
 uploads/
 tmp/
+.local/
 
 # Editor and OS files
 .DS_Store

@@ -45,7 +45,7 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 | DELETE | `/todos/:id` | 删除待办 |
 | GET | `/memories` | 实体、当前事实及历史版本 |
 | PATCH | `/memories/facts/:id` | 创建用户修正版并保留旧版本 |
-| DELETE | `/memories/:entityId` | 删除实体及全部事实历史 |
+| DELETE | `/memories/:entityId` | 忘记实体并删除事实历史；保留抑制标记阻止迟到任务恢复 |
 
 ## PPT
 
@@ -61,7 +61,7 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 ## 健康与能力
 
 - `GET /health/live`
-- `GET /health/ready`：同时检查 PostgreSQL 和 Redis
+- `GET /health/ready`：检查 PostgreSQL 和 Redis，并返回 Worker 心跳与 online/offline 状态
 - `GET /health/capabilities`：返回 Search/SMTP/Embedding/Vision 是否可用，不泄露配置值
 
 ## 错误格式
@@ -71,3 +71,20 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 ```
 
 未知内部错误只返回通用文案及 `traceId`；Provider 原始错误、密钥、Token、完整提示词和文件正文不会返回浏览器。
+
+
+## 整改后新增接口和字段（2026-10-02）
+
+以下路径均以 `/api` 为前缀，需要登录且校验资源所属用户。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/conversations/:id/files/batch` | multipart `files`，最多 20 份；全部注册后再入队解析 |
+| POST | `/files/:id/retry` | 对失败或部分完成的文件重试 |
+| GET | `/memories/tasks` | 最近 100 个抽取任务状态；不返回保存的抽取原文 |
+| POST | `/memories/tasks/:id/retry` | 重试所属用户的记忆任务 |
+| POST | `/presentations/:id/retry` | 重试失败的 PPT 任务 |
+
+会话文件可能为 `PARTIAL`，逐页返回 extractionMethod、qualityStatus、qualityMessage。记忆事实增加 kind（STATE/EVENT）、evidence、withdrawnAt，事件时间与观察时间分开。待办增加 editedFields 和 modelSuggestion；通知增加 CANCELLED 状态。
+
+自动生成 PPT 的版本 previewMeta 包含材料文件 ID、sha256、状态和 parsedSha256；人工编辑版本不重新执行模型事实核对。聊天 SSE 必须收到 run.completed、run.failed 或 run.aborted；HTTP 200 后未收到终止事件即 EOF，前端按异常断流处理并查询后台状态。

@@ -7,6 +7,9 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "setup:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/setup.ps1",
+    "start:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/start.ps1",
+    "stop:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/stop.ps1",
     "dev": "pnpm --parallel --filter @nbboss/api --filter @nbboss/web dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",

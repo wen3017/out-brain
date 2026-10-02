@@ -1,10 +1,10 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 
-export interface SearchResult { title: string; url: string; snippet: string; retrievedAt: string }
+export interface SearchResult { title: string; url: string; snippet: string; retrievedAt: string; publishedAt?: string }
 
 @Injectable()
 export class SearchService {
-  available() { return process.env.SEARCH_ENABLED === "true" && (process.env.SEARCH_PROVIDER === "mock" || Boolean(process.env.SEARCH_API_KEY)); }
+  available() { return process.env.SEARCH_ENABLED === "true" && (process.env.SEARCH_PROVIDER === "mock" || ((process.env.SEARCH_PROVIDER ?? "tavily") === "tavily" && Boolean(process.env.SEARCH_API_KEY))); }
 
   async search(query: string): Promise<SearchResult[]> {
     if (!this.available()) throw new ServiceUnavailableException("联网搜索尚未配置");
@@ -17,9 +17,9 @@ export class SearchService {
       signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) throw new ServiceUnavailableException("联网搜索暂时不可用");
-    const data = await response.json() as { results?: Array<{ title?: string; url?: string; content?: string }> };
+    const data = await response.json() as { results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }> };
     const retrievedAt = new Date().toISOString();
-    return (data.results ?? []).filter((r) => this.isSafeUrl(r.url)).map((r) => ({ title: r.title ?? r.url!, url: r.url!, snippet: r.content ?? "", retrievedAt }));
+    return (data.results ?? []).filter((r) => this.isSafeUrl(r.url)).map((r) => ({ title: r.title ?? r.url!, url: r.url!, snippet: r.content ?? "", retrievedAt, ...(r.published_date && !Number.isNaN(new Date(r.published_date).valueOf()) ? { publishedAt: new Date(r.published_date).toISOString() } : {}) }));
   }
   private isSafeUrl(value: unknown): value is string {
     if (typeof value !== "string") return false;

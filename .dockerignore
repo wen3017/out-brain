@@ -6,4 +6,5 @@ node_modules
 data
 uploads
 tmp
+.local
 coverage

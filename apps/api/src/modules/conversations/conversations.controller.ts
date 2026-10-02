@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Res, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
 import { createConversationSchema, sendMessageSchema } from "@nbboss/contracts";
 import { CurrentUser, type AuthUser } from "../../common/current-user.js";
@@ -43,7 +43,7 @@ export class ConversationsController {
       const maxTurns = error instanceof Error && error.message === "AGENT_MAX_TOOL_TURNS";
       const code = maxTurns ? "MAX_TOOL_TURNS" : safeErrorMeta(error).errorCode;
       console.error(JSON.stringify({ level: "error", traceId, user: createHash("sha256").update(user.id).digest("hex").slice(0, 12), resource: id, operation: "agent.stream", status: "FAILED", errorCode: code }));
-      send({ type: "run.failed", runId: traceId, code, message: maxTurns ? `工具调用次数超过上限，请缩小问题范围（参考编号：${traceId}）` : `生成失败，系统已记录（参考编号：${traceId}）` });
+      send({ type: "run.failed", runId: traceId, code, message: error instanceof BadRequestException ? error.message : maxTurns ? `工具调用次数超过上限，请缩小问题范围（参考编号：${traceId}）` : `生成失败，系统已记录（参考编号：${traceId}）` });
     }
     finally { res.end(); }
   }

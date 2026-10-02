@@ -1,3 +1,8 @@
+import { presentationTextNodes } from "../src/modules/presentations/presentation-grounding.js";
+import { createCanvas } from "@napi-rs/canvas";
+import { extractPdf } from "../src/modules/files/pdf-extraction.js";
+import { TodosService } from "../src/modules/todos/todos.service.js";
+import { MailService } from "../src/modules/mail/mail.service.js";
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
@@ -53,6 +58,24 @@ function textPdf(pages: string[]) {
   for (let id = 1; id < objects.length; id++) output += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
   output += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return Buffer.from(output);
+}
+
+function mixedPdf(imageTexts: string[]) {
+  const objects: Buffer[]=[];
+  objects[1]=Buffer.from("<< /Type /Catalog /Pages 2 0 R >>");
+  objects[2]=Buffer.from(`<< /Type /Pages /Kids [${imageTexts.map((_,i)=>`${4+i*3} 0 R`).join(" ")}] /Count ${imageTexts.length} >>`);
+  objects[3]=Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  imageTexts.forEach((text,i)=>{
+    const canvas=createCanvas(1200,300),ctx=canvas.getContext("2d");ctx.fillStyle="white";ctx.fillRect(0,0,1200,300);ctx.fillStyle="black";ctx.font="40px Arial";ctx.fillText(text,30,140);
+    const jpeg=canvas.toBuffer("image/jpeg");const id=4+i*3;
+    objects[id]=Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /XObject << /Im ${id+2} 0 R >> >> /Contents ${id+1} 0 R >>`);
+    const stream="BT /F1 12 Tf 30 750 Td (Document heading contains more than twenty characters) Tj ET\nq 550 0 0 140 30 500 cm /Im Do Q";
+    objects[id+1]=Buffer.from(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+    objects[id+2]=Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width 1200 /Height 300 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`),jpeg,Buffer.from("\nendstream")]);
+  });
+  const parts=[Buffer.from("%PDF-1.4\n")],offsets=[0];let size=parts[0].length;
+  for(let id=1;id<objects.length;id++){offsets[id]=size;const part=Buffer.concat([Buffer.from(`${id} 0 obj\n`),objects[id],Buffer.from("\nendobj\n")]);parts.push(part);size+=part.length;}
+  parts.push(Buffer.from(`xref\n0 ${objects.length}\n0000000000 65535 f \n${offsets.slice(1).map(n=>`${String(n).padStart(10,"0")} 00000 n \n`).join("")}trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${size}\n%%EOF\n`));return Buffer.concat(parts);
 }
 
 async function waitForFile(baseUrl: string, cookie: string, conversationId: string, fileId: string, timeoutMs = 60_000) {
@@ -226,12 +249,82 @@ integration("API auth, tenant isolation and cascade integration", () => {
     );
     await started.promise;
     await prisma.conversation.delete({ where: { id: conversation.id } });
-    release({ facts: [{ entityType: "PERSON", entityName: "王芳", attribute: "办公地点", value: "上海", confidence: 0.9, effectiveAt: null }] });
+    release({ facts: [{ entityType: "PERSON", entityName: "王芳", attribute: "办公地点", value: "上海", confidence: 0.9, effectiveAt: null, kind:"STATE", evidence:"项目负责人王芳确认后续长期在上海办公室推进交付" }] });
     await extraction;
 
     expect(await prisma.memoryEntity.count({ where: { userId: owner.userId, canonicalName: "王芳" } })).toBe(0);
     expect(await prisma.memoryFact.count({ where: { sourceId: run.id } })).toBe(0);
   }, 30_000);
+
+  it("keeps a forgotten entity suppressed when a live extraction finishes afterwards",async()=>{
+    const owner=await register("forget_live");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"CHAT",title:"forget race"}});
+    const run=await prisma.agentRun.create({data:{userId:owner.userId,conversationId:conversation.id,model:"fixture",status:"COMPLETED"}});
+    const entity=await prisma.memoryEntity.create({data:{userId:owner.userId,type:"PERSON",canonicalName:"王芳",facts:{create:{attribute:"办公地点",value:"南京",sourceType:"USER",sourceId:owner.userId,userEdited:true}}}});
+    const started=Promise.withResolvers<void>(),result=Promise.withResolvers<unknown>();
+    const service=new MemoriesService(prisma as never,{runStructuredAgent:async()=>{started.resolve();return result.promise;}} as never,redis);
+    const extraction=service.extract(owner.userId,"CONVERSATION",run.id,"王芳的办公地点已经由南京调整为上海，这是本人明确确认的最新信息。",new Date());
+    await started.promise;await service.remove(owner.userId,entity.id);
+    result.resolve({facts:[{entityType:"PERSON",entityName:"王芳",attribute:"办公地点",value:"上海",confidence:1,effectiveAt:null,kind:"STATE",evidence:"王芳的办公地点已经由南京调整为上海"}]});
+    await extraction;
+    expect(await service.list(owner.userId)).toHaveLength(0);expect(await prisma.memoryFact.count({where:{entityId:entity.id}})).toBe(0);
+    expect((await prisma.memoryEntity.findUniqueOrThrow({where:{id:entity.id}})).forgottenAt).not.toBeNull();
+  });
+
+  it("versions repeated memory values, preserves distinct events and suppresses forgotten late jobs", async () => {
+    const owner=await register("memory_lifecycle");
+    const service=new MemoriesService(prisma as never,{} as never,redis);
+    const fact={entityType:"PERSON",entityName:"王芳",attribute:"办公地点",confidence:0.9,effectiveAt:null};
+    for(const [month,value] of [[1,"南京"],[2,"上海"],[3,"南京"]] as const){
+      await (service as any).upsertFact(owner.userId,"MEETING","meeting",new Date(`2026-0${month}-01`),{...fact,value});
+    }
+    expect((await service.currentFacts(owner.userId,"王芳")).map(f=>f.value)).toEqual(["南京"]);
+    const event={...fact,attribute:"会议地点",kind:"EVENT"};
+    await (service as any).upsertFact(owner.userId,"MEETING","sep",new Date("2026-09-01"),{...event,value:"南京",effectiveAt:"2026-09-01T00:00:00Z"});
+    await (service as any).upsertFact(owner.userId,"MEETING","oct",new Date("2026-10-01"),{...event,value:"上海",effectiveAt:"2026-10-01T00:00:00Z"});
+    expect((await service.currentFacts(owner.userId,"王芳",{history:true,from:"2026-09-01",to:"2026-09-30"})).map(f=>f.value)).toEqual(["南京"]);
+    expect((await service.currentFacts(owner.userId,"王芳")).filter(f=>f.kind==="EVENT")).toHaveLength(2);
+    const entity=await prisma.memoryEntity.findFirstOrThrow({where:{userId:owner.userId,canonicalName:"王芳"}});
+    await service.remove(owner.userId,entity.id);
+    await (service as any).upsertFact(owner.userId,"MEETING","late",new Date(),{...fact,value:"北京"});
+    expect(await service.list(owner.userId)).toHaveLength(0);
+    expect(await prisma.memoryFact.count({where:{entityId:entity.id}})).toBe(0);
+    expect((await prisma.memoryEntity.findUniqueOrThrow({where:{id:entity.id}})).forgottenAt).not.toBeNull();
+  });
+
+  it("withdraws omitted snapshot facts and rejects stale or archived meeting extraction", async () => {
+    const owner=await register("memory_withdraw");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"MEETING",title:"versions"}});
+    const meeting=await prisma.meeting.create({data:{conversationId:conversation.id,title:"会议",analysis:{}}});
+    const text="王芳确认本次会议地点为南京，会议讨论了项目交付事项。";
+    const models={runStructuredAgent:vi.fn(async()=>({facts:[{entityType:"PERSON",entityName:"王芳",attribute:"会议地点",value:"南京",confidence:0.9,effectiveAt:null,kind:"EVENT",evidence:"本次会议地点为南京"}]}))};
+    const service=new MemoriesService(prisma as never,models as never,redis);
+    await service.extract(owner.userId,"MEETING",meeting.id,text,meeting.updatedAt);
+    expect(await service.currentFacts(owner.userId,"王芳")).toHaveLength(1);
+    const next=await prisma.meeting.update({where:{id:meeting.id},data:{analysisVersion:{increment:1},updatedAt:new Date(meeting.updatedAt.valueOf()+1000)}});
+    models.runStructuredAgent.mockResolvedValue({facts:[]});
+    await service.extract(owner.userId,"MEETING",meeting.id,text,next.updatedAt);
+    expect(await service.currentFacts(owner.userId,"王芳")).toHaveLength(0);
+    const calls=models.runStructuredAgent.mock.calls.length;
+    await service.extract(owner.userId,"MEETING",meeting.id,text,meeting.updatedAt);
+    await prisma.meeting.update({where:{id:meeting.id},data:{archived:true}});
+    await service.extract(owner.userId,"MEETING",meeting.id,text,next.updatedAt);
+    expect(models.runStructuredAgent).toHaveBeenCalledTimes(calls);
+  });
+
+  it("validates an entire upload batch before storing any of its files",async()=>{
+    const owner=await register("batch-invalid");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"MEETING",title:"批量校验"}});
+    await request(baseUrl).post(`/api/conversations/${conversation.id}/files/batch`).set("Cookie",owner.cookie)
+      .attach("files",Buffer.from("周宁承诺交付报告，截止日期未定。"),{filename:"valid.txt",contentType:"text/plain"})
+      .attach("files",Buffer.from("not a PDF"),{filename:"invalid.pdf",contentType:"application/pdf"}).expect(400);
+    expect(await prisma.fileAsset.count({where:{conversationId:conversation.id}})).toBe(0);
+    expect((await prisma.conversation.findUniqueOrThrow({where:{id:conversation.id}})).meetingStatus).toBeNull();
+    await request(baseUrl).post(`/api/conversations/${conversation.id}/files/batch`).set("Cookie",owner.cookie).expect(400);
+    await request(baseUrl).post(`/api/conversations/${conversation.id}/files/batch`).set("Cookie",owner.cookie)
+      .attach("files",Buffer.from("   \n"),{filename:"empty.txt",contentType:"text/plain"}).expect(400);
+    expect(await prisma.fileAsset.count({where:{conversationId:conversation.id}})).toBe(0);
+  });
 
   it("rejects oversized uploads and never derives storage paths from hostile filenames", async () => {
     const owner = await register("upload");
@@ -284,7 +377,7 @@ integration("API auth, tenant isolation and cascade integration", () => {
     await rm(join(process.env.STORAGE_ROOT ?? join(process.cwd(), "data", "uploads"), owner.userId, conversation.id), { recursive: true, force: true });
   }, 30_000);
 
-  it("reuses per-file meeting cache, filters invented evidence and lets force bypass cache", async () => {
+  it("reuses complete material snapshots, filters invented evidence and preserves confirmed todo fields", async () => {
     const owner = await register("meeting_cache");
     const conversation = await prisma.conversation.create({ data: { userId: owner.userId, mode: "MEETING", title: "meeting cache" } });
     const firstFile = await prisma.fileAsset.create({ data: { userId: owner.userId, conversationId: conversation.id, kind: "TXT", originalName: "first.txt", storagePath: "/test/first.txt", mimeType: "text/plain", size: 100, sha256: "1".repeat(64), status: "READY" } });
@@ -293,7 +386,7 @@ integration("API auth, tenant isolation and cascade integration", () => {
     const models = { runStructuredAgent: vi.fn(async (_system: string, prompt: string) => {
       prompts.push(prompt);
       return { meetings: [{
-        sourceFileIds: [firstFile.id], title: "项目周会", summary: "讨论验收", participants: ["王芳"], time: null, location: null,
+        sourceFileIds: [...prompt.matchAll(/FILE id=([^ ]+) name=.* type=TXT/g)].map(match=>match[1]), title: "项目周会", summary: "讨论验收", participants: ["王芳"], time: null, location: null,
         topics: ["验收"], decisions: [], commitments: ["王芳承诺完成验收文档"], grouping: "SAME_MEETING", insights: ["需补齐时间"],
         risks: [
           { severity: "HIGH", description: "承诺缺少截止时间", evidence: [{ fileId: firstFile.id, fileName: "wrong-name.txt", quote: "王芳承诺完成验收文档" }], todo: { title: "确认验收文档期限", description: "补齐日期", owner: "王芳", dueAt: null } },
@@ -301,7 +394,7 @@ integration("API auth, tenant isolation and cascade integration", () => {
         ],
       }] };
     }) };
-    const mail = { sendMeetingSummary: vi.fn(async () => ({ status: "SENT" })) };
+    const mail = new MailService(prisma as never);
     const jobs = { extractMemory: vi.fn(async () => ({})) };
     const conversations = { assertOwned: vi.fn(async () => conversation) };
     const service = new MeetingsService(prisma as never, conversations as never, models as never, mail as never, jobs as never, redis);
@@ -315,7 +408,8 @@ integration("API auth, tenant isolation and cascade integration", () => {
     const duplicate = await service.analyzeConversation(owner.userId, conversation.id, false);
     expect(duplicate[0].id).toBe(oldMeetingId);
     expect(models.runStructuredAgent).toHaveBeenCalledTimes(1);
-    expect(mail.sendMeetingSummary).toHaveBeenCalledTimes(1);
+    expect(await prisma.emailDelivery.count({ where: { meetingId: oldMeetingId } })).toBe(1);
+    await prisma.todo.update({ where: { id: result[0].todos[0].id }, data: { editedFields: ["owner","dueAt"], status: "COMPLETED", owner: "人工确认负责人", dueAt: new Date("2026-12-31") } });
     const memoryEntity = await prisma.memoryEntity.create({ data: { userId: owner.userId, type: "TOPIC", canonicalName: "会议缓存清理" } });
     const extractedFact = await prisma.memoryFact.create({ data: { entityId: memoryEntity.id, attribute: "状态", value: "旧会议抽取", sourceType: "MEETING", sourceId: oldMeetingId } });
     const editedFact = await prisma.memoryFact.create({ data: { entityId: memoryEntity.id, attribute: "状态", value: "用户修正", sourceType: "USER", sourceId: owner.userId, userEdited: true } });
@@ -324,17 +418,120 @@ integration("API auth, tenant isolation and cascade integration", () => {
     const secondFile = await prisma.fileAsset.create({ data: { userId: owner.userId, conversationId: conversation.id, kind: "TXT", originalName: "second.txt", storagePath: "/test/second.txt", mimeType: "text/plain", size: 80, sha256: "2".repeat(64), status: "READY" } });
     await prisma.documentPage.create({ data: { fileId: secondFile.id, pageNo: 1, text: "李明补充了新的会议记录。" } });
     await service.analyzeConversation(owner.userId, conversation.id, false);
-    expect(prompts[1]).toContain("[缓存分析]");
+    expect(prompts[1]).not.toContain("[缓存分析]");
+    expect(prompts[1]).toContain("王芳承诺完成验收文档");
     expect(prompts[1]).toContain("李明补充了新的会议记录");
-    expect(await prisma.memoryFact.count({ where: { id: extractedFact.id } })).toBe(0);
+    expect(await prisma.memoryFact.count({ where: { id: extractedFact.id } })).toBe(1);
     expect(await prisma.memoryFact.count({ where: { id: editedFact.id, supersededById: null } })).toBe(1);
 
     await service.analyzeConversation(owner.userId, conversation.id, true);
     expect(prompts[2]).not.toContain("[缓存分析]");
     expect(prompts[2]).toContain("王芳承诺完成验收文档");
-    expect(mail.sendMeetingSummary).toHaveBeenCalledTimes(3);
-    expect((await prisma.emailDelivery.count({ where: { meeting: { conversationId: conversation.id } } }))).toBe(0);
+    const preserved = await prisma.todo.findUniqueOrThrow({ where: { id: result[0].todos[0].id } });
+    expect(preserved.status).toBe("COMPLETED"); expect(preserved.owner).toBe("人工确认负责人"); expect(preserved.dueAt?.toISOString()).toContain("2026-12-31");
+    expect(await prisma.todo.count({ where: { meetingId: oldMeetingId } })).toBe(1);
+    expect((await prisma.emailDelivery.count({ where: { meeting: { conversationId: conversation.id }, status: { not: "CANCELLED" } } }))).toBe(1);
   }, 30_000);
+
+  it("waits for PDF backgrounds and invalidates the complete snapshot when background content changes",async()=>{
+    const owner=await register("material_snapshot");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"MEETING",title:"snapshot"}});
+    const txt=await prisma.fileAsset.create({data:{userId:owner.userId,conversationId:conversation.id,kind:"TXT",originalName:"notes.txt",storagePath:"/test/notes",mimeType:"text/plain",size:10,sha256:"txt",status:"READY",pages:{create:{pageNo:1,text:"会议已明确全部行动，无未决事项。"}}}});
+    const pdf=await prisma.fileAsset.create({data:{userId:owner.userId,conversationId:conversation.id,kind:"PDF",originalName:"background.pdf",storagePath:"/test/background",mimeType:"application/pdf",size:10,sha256:"pdf-v1",status:"PROCESSING",pages:{create:{pageNo:1,text:"背景预算第一版"}}}});
+    const prompts:string[]=[];
+    const models={runStructuredAgent:vi.fn(async(_system:string,prompt:string)=>{prompts.push(prompt);return {meetings:[{sourceFileIds:[txt.id],title:"会议",summary:"完整材料",participants:[],time:null,location:null,topics:[],decisions:[],commitments:[],grouping:"SAME_MEETING",insights:[],risks:[]}]};})};
+    const service=new MeetingsService(prisma as never,new ConversationsService(prisma as never),models as never,new MailService(prisma as never),{extractMemory:async()=>({})} as never,redis);
+    await expect(service.analyzeConversation(owner.userId,conversation.id)).rejects.toThrow("仍在解析");expect(models.runStructuredAgent).not.toHaveBeenCalled();
+    await prisma.fileAsset.update({where:{id:pdf.id},data:{status:"READY"}});
+    await service.analyzeConversation(owner.userId,conversation.id);await service.analyzeConversation(owner.userId,conversation.id);
+    expect(models.runStructuredAgent).toHaveBeenCalledTimes(1);expect(prompts[0]).toContain("背景预算第一版");
+    await prisma.fileAsset.update({where:{id:pdf.id},data:{sha256:"pdf-v2"}});await prisma.documentPage.updateMany({where:{fileId:pdf.id},data:{text:"背景预算第二版"}});
+    await service.analyzeConversation(owner.userId,conversation.id);expect(models.runStructuredAgent).toHaveBeenCalledTimes(2);expect(prompts[1]).toContain("背景预算第二版");
+    await prisma.fileAsset.update({where:{id:pdf.id},data:{status:"PARTIAL"}});await expect(service.analyzeConversation(owner.userId,conversation.id)).rejects.toThrow("失败的会议材料");
+  });
+
+  it("deduplicates concurrent uploads within a conversation, retaining isolation and new content", async () => {
+    const owner=await register("dedup");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"CHAT",title:"dedup"}});
+    const bytes=textPdf(["A document with enough text for reliable extraction"]);
+    const upload=(id:string,payload=bytes)=>request(baseUrl).post(`/api/conversations/${id}/files`).set("Cookie",owner.cookie).attach("file",payload,{filename:"same.pdf",contentType:"application/pdf"}).expect(201);
+    const results=await Promise.all([upload(conversation.id),upload(conversation.id),upload(conversation.id)]);
+    expect(new Set(results.map(r=>r.body.id)).size).toBe(1);
+    expect(await prisma.fileAsset.count({where:{conversationId:conversation.id}})).toBe(1);
+    const changed=await upload(conversation.id,textPdf(["A different revision under the same filename for this document"]));
+    expect(changed.body.id).not.toBe(results[0].body.id);
+    const other=await prisma.conversation.create({data:{userId:owner.userId,mode:"CHAT",title:"isolated"}});
+    expect((await upload(other.id)).body.id).not.toBe(results[0].body.id);
+  });
+
+  it("preserves todo identity through meeting merge/split, refreshes suggestions and current mail snapshots", async () => {
+    const owner=await register("meeting_regroup");
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"MEETING",title:"regroup"}});
+    const quotes=["王芳承诺在本月内完成所有验收资料但没有明确截止日期", "李明承诺负责交付培训材料但没有明确验收标准"];
+    const files=await Promise.all(quotes.map((quote,i)=>prisma.fileAsset.create({data:{userId:owner.userId,conversationId:conversation.id,kind:"TXT",originalName:`${i}.txt`,storagePath:`/test/${i}`,mimeType:"text/plain",size:100,sha256:String(i).repeat(64),status:"READY",pages:{create:{pageNo:1,text:quote}}}})));
+    let groups=[[0],[1]], proposedOwner="模型初稿";
+    const models={runStructuredAgent:vi.fn(async()=>({meetings:groups.map(indices=>({sourceFileIds:indices.map(i=>files[i].id),title:indices.join("+")+"会议",summary:"验收讨论",participants:[],time:null,location:null,topics:[],decisions:[],commitments:[],grouping:indices.length>1?"SAME_MEETING":"DIFFERENT_MEETINGS",insights:[],risks:indices.map(i=>({severity:"HIGH",description:`风险${i}`,evidence:[{fileId:files[i].id,fileName:files[i].originalName,quote:quotes[i]}],todo:{title:`行动${i}`,description:"请确认",owner:proposedOwner,dueAt:null}}))}))}))};
+    const mail=new MailService(prisma as never);
+    const service=new MeetingsService(prisma as never,new ConversationsService(prisma as never),models as never,mail, {extractMemory:async()=>({})} as never,redis);
+    await service.analyzeConversation(owner.userId,conversation.id,true);
+    const original=await prisma.todo.findMany({where:{userId:owner.userId},orderBy:{title:"asc"}});
+    const todos=new TodosService(prisma as never);
+    await todos.update(owner.userId,original[0].id,{owner:"人工确认",status:"COMPLETED",dueAt:new Date("2026-12-31")});
+    proposedOwner="模型修订";groups=[[0,1]];
+    await service.analyzeConversation(owner.userId,conversation.id,true);
+    let current=await prisma.todo.findMany({where:{userId:owner.userId},orderBy:{title:"asc"}});
+    expect(current.map(t=>t.id)).toEqual(original.map(t=>t.id));
+    expect(current[0]).toMatchObject({owner:"人工确认",status:"COMPLETED"});expect(current[1].owner).toBe("模型修订");
+    expect(new Set(current.map(t=>t.meetingId)).size).toBe(1);
+    const delivery=await mail.enqueueSummary(current[0].meetingId);
+    expect(JSON.stringify(delivery?.payload)).toContain("人工确认");expect(JSON.stringify(delivery?.payload)).toContain("2026-12-31");
+    expect((await mail.enqueueSummary(current[0].meetingId))?.id).toBe(delivery?.id);
+    groups=[[0],[1]];await service.analyzeConversation(owner.userId,conversation.id,true);
+    current=await prisma.todo.findMany({where:{userId:owner.userId},orderBy:{title:"asc"}});
+    expect(current.map(t=>t.id)).toEqual(original.map(t=>t.id));expect(new Set(current.map(t=>t.meetingId)).size).toBe(2);
+    expect(current[0].owner).toBe("人工确认");expect(current[0].status).toBe("COMPLETED");
+    // A disappearing risk must invalidate the outstanding current notification.
+    await prisma.risk.updateMany({where:{meetingId:current[0].meetingId},data:{active:false}});
+    expect(await mail.enqueueSummary(current[0].meetingId)).toBeUndefined();
+    expect(await prisma.emailDelivery.count({where:{meetingId:current[0].meetingId,status:{in:["PENDING","DISABLED"]}}})).toBe(0);
+    // An actual quote from another meeting is still invalid evidence.
+    const bad={runStructuredAgent:async()=>({meetings:[{sourceFileIds:[files[0].id],title:"wrong",summary:"",participants:[],time:null,location:null,topics:[],decisions:[],commitments:[],grouping:"DIFFERENT_MEETINGS",insights:[],risks:[{severity:"HIGH",description:"wrong group",evidence:[{fileId:files[1].id,fileName:"1.txt",quote:quotes[1]}],todo:{title:"wrong",description:"",owner:"待确认",dueAt:null}}]}]})};
+    const invalid=new MeetingsService(prisma as never,new ConversationsService(prisma as never),bad as never,mail,{extractMemory:async()=>({})} as never,redis);
+    await expect(invalid.analyzeConversation(owner.userId,conversation.id,true)).rejects.toThrow("其他会议");
+    expect(await prisma.todo.count({where:{userId:owner.userId}})).toBe(2);
+  });
+
+  it("uses the newest requirements retaining early constraints after more than one hundred messages when generating PPT", async () => {
+    const owner = await register("ppt_latest");
+    const conversation = await prisma.conversation.create({ data: { userId: owner.userId, mode: "CHAT", title: "长对话" } });
+    await prisma.message.createMany({ data: Array.from({ length: 105 }, (_, i) => ({ conversationId: conversation.id, role: "USER" as const, content: i === 104 ? "最新要求：星辰项目汇报，目标受众为项目经理" : i===0?"最初约束：不要泄露客户名称，金额用万元表示":`历史讨论 ${i}`, createdAt: new Date(1700000000000+i*1000) })) });
+    let captured = "";
+    const models = { runStructuredAgent: async (_system: string, prompt: string, tool:string) => { if(tool==="review_presentation_facts")return {items:JSON.parse(prompt.split("待审文字：\n")[1]).map((node:any)=>({...node,kind:"HEADING",evidence:""}))}; captured = prompt; return { title: "星辰", slides: Array.from({ length: 3 }, (_,i) => ({ id:`s${i}`, title:`第${i+1}页`, notes:"", elements:[{ id:`e${i}`, type:"text", text:"星辰项目", x:1,y:1,w:5,h:1,fontSize:24,color:"111827",bold:false }] })) }; } };
+    const service = new PresentationsService(prisma as never, models as never, {} as never, {} as never, redis);
+    await (service as any).createDocument(owner.userId, conversation.id, "生成 3 页 PPT", async () => {});
+    expect(captured).toContain("最新要求：星辰项目汇报");
+    expect(captured).toContain("目标受众为项目经理");
+    expect(captured).toContain("最初约束：不要泄露客户名称，金额用万元表示");
+  });
+
+  it("retrieves facts beyond thirty entities without crossing tenants", async () => {
+    const owner = await register("memory_many");
+    const other = await register("memory_other");
+    for (let i = 0; i < 36; i++) await prisma.memoryEntity.create({ data: { userId: owner.userId, type: "PERSON", canonicalName: i === 35 ? "张总" : `成员${i}`, facts: { create: { attribute: "负责项目", value: i === 35 ? "星辰项目" : "其他项目", sourceType: "USER", sourceId: owner.userId } } } });
+    await prisma.memoryEntity.create({ data: { userId: other.userId, type: "PERSON", canonicalName: "张总", facts: { create: { attribute: "负责项目", value: "保密项目", sourceType: "USER", sourceId: other.userId } } } });
+    const service = new MemoriesService(prisma as never, {} as never, redis);
+    const facts = await service.currentFacts(owner.userId, "张总负责哪个项目？");
+    expect(facts.some(f => f.entity === "张总" && f.value === "星辰项目")).toBe(true);
+    expect(JSON.stringify(facts)).not.toContain("保密项目");
+  });
+
+  it("OCRs scanned bodies despite long text headers and flags pages with no readable image body",async()=>{
+    const pages=await extractPdf(mixedPdf(["Scanned contract deadline October 17 2026", "", "Final page budget seven million yuan"]));
+    expect(pages).toHaveLength(3);
+    expect(pages[0].extractionMethod).toBe("OCR");expect(pages[0].text).toContain("October 17 2026");
+    expect(pages[1].qualityStatus).toBe("REVIEW_REQUIRED");expect(pages[1].qualityMessage).toContain("第 2 页");
+    expect(pages[2].text).toContain("seven million");
+  },120_000);
 
   it("parses 200-page PDFs within the target and performs isolated multi-PDF BM25 retrieval with page citations", async () => {
     const owner = await register("pdf");
@@ -367,6 +564,27 @@ integration("API auth, tenant isolation and cascade integration", () => {
     await request(baseUrl).delete(`/api/conversations/${otherConversation.body.id}`).set("Cookie", other.cookie).expect(200);
     expect(await prisma.documentPage.count({ where: { fileId: { in: [uploadedA.body.id, uploadedB.body.id, uploadedLarge.body.id] } } })).toBe(0);
   }, 70_000);
+
+  it("recovers orphaned background states and retries memory tasks through the owned API",async()=>{
+    const owner=await register("task_recovery"),attacker=await register("task_attacker");
+    const stale=new Date(Date.now()-20*60_000);
+    const conversation=await prisma.conversation.create({data:{userId:owner.userId,mode:"MEETING",title:"orphan recovery",meetingStatus:"PROCESSING",updatedAt:stale}});
+    const file=await prisma.fileAsset.create({data:{userId:owner.userId,conversationId:conversation.id,kind:"TXT",originalName:"orphan.txt",storagePath:"/test/missing",mimeType:"text/plain",size:1,sha256:"orphan",status:"PROCESSING",createdAt:stale}});
+    const ppt=await prisma.presentation.create({data:{conversationId:conversation.id,title:"orphan",requestedPrompt:"orphan",status:"PROCESSING",updatedAt:stale}});
+    const run=await prisma.agentRun.create({data:{userId:owner.userId,conversationId:conversation.id,model:"fixture",status:"COMPLETED"}});
+    const task=await prisma.memoryExtraction.create({data:{userId:owner.userId,sourceType:"CONVERSATION",sourceId:run.id,observedAt:stale,text:"简短",status:"PROCESSING",updatedAt:stale}});
+    const deadline=Date.now()+45_000;
+    while(Date.now()<deadline){if((await prisma.memoryExtraction.findUniqueOrThrow({where:{id:task.id}})).status==="FAILED")break;await new Promise(r=>setTimeout(r,1000));}
+    expect((await prisma.memoryExtraction.findUniqueOrThrow({where:{id:task.id}})).status).toBe("FAILED");
+    expect((await prisma.fileAsset.findUniqueOrThrow({where:{id:file.id}})).status).toBe("FAILED");
+    expect((await prisma.presentation.findUniqueOrThrow({where:{id:ppt.id}})).status).toBe("FAILED");
+    expect((await prisma.conversation.findUniqueOrThrow({where:{id:conversation.id}})).meetingStatus).toBe("FAILED");
+    await request(baseUrl).post(`/api/memories/tasks/${task.id}/retry`).set("Cookie",attacker.cookie).expect(404);
+    await request(baseUrl).post(`/api/memories/tasks/${task.id}/retry`).set("Cookie",owner.cookie).expect(201);
+    for(let i=0;i<20;i++){if((await prisma.memoryExtraction.findUniqueOrThrow({where:{id:task.id}})).status==="READY")break;await new Promise(r=>setTimeout(r,500));}
+    expect((await prisma.memoryExtraction.findUniqueOrThrow({where:{id:task.id}})).status).toBe("READY");
+    expect((await request(baseUrl).get("/api/health/ready")).body.worker).toBe("online");
+  },60_000);
 
   it("serves ten isolated users concurrently without crossing the local response target", async () => {
     const startedAt = Date.now();
@@ -417,13 +635,13 @@ integration("API auth, tenant isolation and cascade integration", () => {
       previous.enabled === undefined ? delete process.env.SEARCH_ENABLED : process.env.SEARCH_ENABLED = previous.enabled;
       previous.provider === undefined ? delete process.env.SEARCH_PROVIDER : process.env.SEARCH_PROVIDER = previous.provider;
     }
-    expect(events.filter((event) => event.type === "tool.started" && event.toolName === "search_web")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "tool.started" && event.toolName === "search_web")).toHaveLength(3);
     const searchRuns = await prisma.searchRun.findMany({ where: { message: { conversationId: conversation.id } } });
-    expect(searchRuns).toHaveLength(2);
+    expect(searchRuns).toHaveLength(3);
     expect(searchRuns.every((run) => Array.isArray(run.sources) && (run.sources as any[])[0]?.url.startsWith("https://"))).toBe(true);
     const restored = await conversations.get(owner.userId, conversation.id);
     const assistant = restored.messages.find((message) => message.role === "ASSISTANT");
-    expect(assistant?.searchRuns).toHaveLength(2);
+    expect(assistant?.searchRuns).toHaveLength(3);
     expect(JSON.stringify(assistant?.searchRuns)).toContain("retrievedAt");
   }, 30_000);
 });

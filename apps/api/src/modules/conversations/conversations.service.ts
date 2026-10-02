@@ -24,8 +24,9 @@ export class ConversationsService {
     const conversation = await this.prisma.conversation.findFirst({
       where: { id, userId },
       include: {
+        runs: { where: { status: { in: ["RUNNING","PENDING"] } }, orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, errorCode: true } },
         messages: { where: { role: { in: ["USER", "ASSISTANT"] } }, orderBy: { createdAt: "asc" }, select: { id: true, role: true, content: true, status: true, createdAt: true, searchRuns: { orderBy: { searchedAt: "asc" }, select: { id: true, query: true, searchedAt: true, sources: true } } } },
-        files: { select: { id: true, originalName: true, kind: true, size: true, status: true, errorMessage: true, createdAt: true } },
+        files: { select: { id: true, originalName: true, kind: true, size: true, status: true, errorMessage: true, createdAt: true, pages: { select: { pageNo: true, extractionMethod: true, qualityStatus: true, qualityMessage: true } } } },
         meetings: { orderBy: { createdAt: "desc" }, include: { risks: true, todos: true, emails: true } },
         presentations: { orderBy: { createdAt: "desc" }, include: { versions: { orderBy: { version: "desc" }, select: { id: true, version: true, createdAt: true } } } },
       },
@@ -62,6 +63,7 @@ export class ConversationsService {
         ]);
         const sourceIds = [...runs.map((run) => run.id), ...meetings.map((meeting) => meeting.id)];
         await deleteMemoryFactsBySources(tx, userId, sourceIds);
+        await tx.memoryExtraction.deleteMany({where:{userId,sourceId:{in:sourceIds}}});
         await tx.conversation.delete({ where: { id } });
       });
     } catch (error) {
