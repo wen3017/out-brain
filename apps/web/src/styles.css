@@ -1691,6 +1691,56 @@ button, a {
   padding-bottom: 16px;
 }
 
+.recent-uploads {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 0 0 7px;
+  white-space: nowrap;
+}
+
+.recent-uploads-label {
+  flex: none;
+  color: #72869b;
+  font-size: 11px;
+}
+
+.recent-upload-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(320px, 65vw);
+  padding: 5px 7px;
+  border: 1px solid #d9e7f3;
+  border-radius: 7px;
+  background: #f5f9fd;
+  color: #4d708d;
+  font-size: 11px;
+}
+
+.recent-upload-chip>span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-upload-chip>small {
+  flex: none;
+  color: #19845e;
+}
+
+.recent-upload-chip.failed>small { color: #c33535; }
+.recent-upload-chip.partial>small { color: #986600; }
+
+.recent-upload-chip>button {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: #7990a5;
+}
+
 .composer {
   border-color: #d5e3f0;
   border-radius: 10px;

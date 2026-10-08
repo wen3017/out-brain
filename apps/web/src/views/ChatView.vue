@@ -29,6 +29,9 @@ const detailLoading = ref(false);
 const recentConversations = computed(() => [...conversations.value].sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)).slice(0,6));
 const filteredConversations = computed(() => conversations.value.filter(item => item.title.toLowerCase().includes(historySearch.value.trim().toLowerCase())));
 const activeTools = ref<Array<{ id:string; name:string; status:"RUNNING"|"COMPLETED"|"FAILED" }>>([]);
+const recentUploads = ref<Array<Pick<FileItem,"id"|"originalName"|"status">>>([]);
+const visibleUploads = computed(() => recentUploads.value.map(upload => detail.value?.files.find(file => file.id === upload.id) ?? upload));
+function dismissRecentUpload(id:string) { recentUploads.value = recentUploads.value.filter(file => file.id !== id); }
 function toolLabel(name:string) { return ({ read_meetings:"读取当前会议", retrieve_documents:"检索会话文件", retrieve_memory:"检索长期记忆", search_web:"联网搜索", analyze_meeting:"分析会议", create_todos:"创建待办", generate_presentation:"生成 PPT" } as Record<string,string>)[name] ?? name; }
 async function loadList() { listLoading.value=true; listError.value=""; try { conversations.value=await api<Conversation[]>("/conversations"); } catch(e) { listError.value=(e as Error).message; } finally { listLoading.value=false; } }
 async function loadDetail() { const requestSeq = ++detailRequestSeq; if (!currentId.value) { detail.value = null; return; } const id = currentId.value; const result = await api<Detail>(`/conversations/${id}`); if (requestSeq !== detailRequestSeq || id !== currentId.value || disposed) return; detail.value = result; const savedDraft=readDraft(id);const submittedAt=Number(sessionStorage.getItem(`${draftKey(id)}:submittedAt`));if(savedDraft && submittedAt && result.messages.some(m=>m.role==="USER" && m.content===savedDraft && m.createdAt && new Date(m.createdAt).valueOf()>=submittedAt-1000)){sessionStorage.removeItem(draftKey(id));sessionStorage.removeItem(`${draftKey(id)}:submittedAt`);if(content.value===savedDraft)content.value="";} if (!aborter) { const run = result.runs?.[0]; streaming.value = run?.status === "RUNNING"; runId.value = streaming.value ? run!.id : ""; } if (isBusy(result)) void pollPresentations(); await nextTick(); scroll.value?.scrollTo({ top: scroll.value.scrollHeight }); }
@@ -52,7 +55,7 @@ async function send() {
   detail.value?.messages.push({ id:crypto.randomUUID(), role:"USER", content:text, status:"COMPLETED" });
   try {
     await streamMessage(id, text, webSearch.value, (event) => {
-      if (event.type === "run.started" || event.type === "run.completed") { accepted = true; sessionStorage.removeItem(draftKey(id));sessionStorage.removeItem(`${draftKey(id)}:submittedAt`); }
+      if (event.type === "run.started" || event.type === "run.completed") { accepted = true; sessionStorage.removeItem(draftKey(id));sessionStorage.removeItem(`${draftKey(id)}:submittedAt`); if (active()) recentUploads.value = []; }
       if (!active()) return;
       if (event.runId) runId.value = event.runId;
       if (event.type === "message.delta") streamText.value += event.delta;
@@ -80,10 +83,10 @@ async function upload(event:Event) {
   if(files.length > UPLOAD_LIMITS.files || files.reduce((sum,file)=>sum+file.size,0)>UPLOAD_LIMITS.batchBytes){ error.value="每批最多 20 个文件，总大小不能超过 50 MB"; input.value=""; return; }
   if(files.some(file=>file.size > (file.name.toLowerCase().endsWith(".txt")?UPLOAD_LIMITS.txtBytes:UPLOAD_LIMITS.pdfBytes))){error.value="单文件大小限制：PDF 20 MB，TXT 5 MB";input.value="";return;}
   input.value=""; error.value="";
-  try { const form=new FormData();for(const file of files)form.append("files",file);await api(`/conversations/${id}/files/batch`,{method:"POST",body:form}); if(currentId.value===id)await loadDetail(); }
+  try { const form=new FormData();for(const file of files)form.append("files",file);const uploaded=await api<Array<Pick<FileItem,"id"|"originalName"|"status">>>(`/conversations/${id}/files/batch`,{method:"POST",body:form}); if(currentId.value===id){recentUploads.value=[...recentUploads.value.filter(item=>!uploaded.some(file=>file.id===item.id)),...uploaded];await loadDetail();} }
   catch(e){if(currentId.value===id){error.value=(e as Error).message;try{await loadDetail();}catch{/* Preserve the upload error if refreshing also fails. */}}}
 }
-async function removeFile(id:string) { if(!confirm("删除文件后将同步清理索引，会议文件变化还会触发重新分析。确认删除？"))return; await api(`/files/${id}`,{method:"DELETE"});await loadDetail(); }
+async function removeFile(id:string) { if(!confirm("删除文件后将同步清理索引，会议文件变化还会触发重新分析。确认删除？"))return; await api(`/files/${id}`,{method:"DELETE"});dismissRecentUpload(id);await loadDetail(); }
 async function reanalyze() { if (!currentId.value) return; error.value=""; try { await api(`/conversations/${currentId.value}/meetings/reanalyze`, { method:"POST" }); await loadDetail(); artifactOpen.value=true; void pollPresentations(); } catch(e) { error.value=e instanceof Error?e.message:"分析失败"; } }
 async function generatePpt() { if (!currentId.value) return; const prompt=window.prompt("请输入 PPT 要求", "基于当前会话生成一份专业汇报 PPT"); if (!prompt) return; try { await api(`/conversations/${currentId.value}/presentations`, { method:"POST", body:JSON.stringify({prompt,idempotencyKey:crypto.randomUUID()}) }); await loadDetail(); artifactOpen.value=true; void pollPresentations(); } catch(e){error.value=e instanceof Error?e.message:"生成失败";} }
 let pollEpoch = 0; let pollingId: string | undefined; let disposed = false;
@@ -110,7 +113,7 @@ function html(text:string) { return DOMPurify.sanitize(marked.parse(text) as str
 function safeLink(value:string) { try { const url=new URL(value); return url.protocol==='http:'||url.protocol==='https:'?url.href:undefined; } catch { return undefined; } }
 watch(currentId, async(id,oldId)=>{
   if(oldId && content.value)sessionStorage.setItem(draftKey(oldId),content.value);
-  streamEpoch++;aborter?.abort();aborter=null;streaming.value=false;streamText.value="";runId.value="";activeTools.value=[];error.value="";detail.value=null;
+  streamEpoch++;aborter?.abort();aborter=null;streaming.value=false;streamText.value="";runId.value="";activeTools.value=[];recentUploads.value=[];error.value="";detail.value=null;
   content.value=readDraft(id);pollEpoch++;pollingId=undefined;await refreshDetail();
 });
 async function refreshDetail() { detailLoading.value=true; const id=currentId.value; try { await loadDetail(); if(id===currentId.value)error.value=""; } catch(e) { if(id===currentId.value)error.value=(e as Error).message; } finally { if(id===currentId.value)detailLoading.value=false; } }
@@ -150,6 +153,7 @@ onMounted(async()=>{content.value=readDraft(currentId.value);if(window.innerWidt
         <p v-if="error" class="error callout">{{ error }}</p>
       </div>
       <div class="composer-wrap">
+        <div v-if="visibleUploads.length" class="recent-uploads" aria-live="polite"><span class="recent-uploads-label">已上传到本会话</span><span v-for="file in visibleUploads" :key="file.id" :class="['recent-upload-chip',file.status.toLowerCase()]" :title="file.originalName"><FileText :size="14"/><span>{{file.originalName}}</span><small>{{file.status==='READY'?'可检索':file.status==='FAILED'?'解析失败':file.status==='PARTIAL'?'部分可检索':'解析中'}}</small><button type="button" :aria-label="`收起${file.originalName}的上传提示`" title="收起提示，文件仍保存在会话产物中" @click="dismissRecentUpload(file.id)"><X :size="13"/></button></span></div>
         <div class="composer"><textarea v-model="content" rows="2" placeholder="输入消息，Shift + Enter 换行" @keydown.enter.exact="handleEnter"></textarea><div class="composer-actions"><div><input ref="fileInput" hidden type="file" multiple :accept="detail.mode==='MEETING'?'.pdf,.txt':'.pdf'" @change="upload"/><button title="上传文件" @click="fileInput?.click()"><Paperclip :size="18"/></button><label class="search-mode" :title="capabilities.search?'自动模式会检索时效性问题；关闭模式不联网':'联网未配置：时效性问题会提示配置，不会伪造实时结果'"><Globe2 :size="18"/><select v-model="webSearch" aria-label="联网模式"><option value="auto">自动联网</option><option value="on">开启联网</option><option value="off">关闭联网</option></select><small v-if="!capabilities.search">未配置</small></label><button title="生成 PPT" @click="generatePpt"><Presentation :size="18"/> PPT</button><button v-if="detail.mode==='MEETING'" :disabled="detail.meetingStatus==='PROCESSING'" @click="reanalyze"><Users :size="18"/> {{detail.meetingStatus==='PROCESSING'?'分析中':'重新分析'}}</button></div><button v-if="streaming" class="send" aria-label="停止生成" @click="stop"><Square :size="17"/></button><button v-else class="send" aria-label="发送消息" :disabled="!content.trim()" @click="send"><Send :size="17"/></button></div></div>
         <small>AI 可能犯错。文件引用和行动项请结合原文核对；对话与上传内容会发送至已配置的外部模型服务处理。</small>
       </div>
