@@ -2,6 +2,7 @@ import { confirmedMemoryInput, explicitlyAdoptsProposal } from "../src/modules/m
 import { presentationTextNodes } from "../src/modules/presentations/presentation-grounding.js";
 import { describe, expect, it, vi } from "vitest";
 import { FilesService } from "../src/modules/files/files.service.js";
+import { readableFileName } from "../src/modules/files/filename.js";
 import { MemoriesService } from "../src/modules/memories/memories.service.js";
 import { TodosService } from "../src/modules/todos/todos.service.js";
 import { AgentRuntimeService } from "../src/modules/agent/agent-runtime.service.js";
@@ -13,6 +14,12 @@ import { z } from "zod";
 import { presentationSchema } from "@nbboss/contracts";
 
 describe("file safety", () => {
+  it("restores Chinese multipart filenames without changing valid filenames", () => {
+    const original = "Java_AI工程岗位高频面试题与追问答案.pdf";
+    expect(readableFileName(Buffer.from(original).toString("latin1"))).toBe(original);
+    expect(readableFileName(original)).toBe(original);
+    expect(readableFileName("résumé.pdf")).toBe("résumé.pdf");
+  });
   const service = new FilesService({} as any, { assertOwned: vi.fn(async () => ({mode:"MEETING"})) } as any, {} as any, {} as any);
   it("rejects a PDF extension with a forged MIME type", async () => {
     await expect(service.save("u", "c", { originalname: "attack.pdf", mimetype: "text/plain", size: 5, buffer: Buffer.from("hello") } as any)).rejects.toMatchObject({ status: 400 });

@@ -1,4 +1,5 @@
 import { extractPdf } from "./pdf-extraction.js";
+import { readableFileName } from "./filename.js";
 import { UPLOAD_LIMITS } from "@nbboss/contracts";
 import { resourceLimit } from "../../common/resource-limits.js";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
@@ -76,6 +77,7 @@ export class FilesService {
 
   private validateUpload(file:Express.Multer.File,mode:string):{ext:string;kind:"PDF"|"TXT"} {
     if (!file?.buffer) throw new BadRequestException("请选择要上传的文件");
+    file.originalname = readableFileName(file.originalname);
     const ext = extname(file.originalname).toLowerCase();
     const kind = ext === ".pdf" ? "PDF" : ext === ".txt" ? "TXT" : null;
     if (!kind) throw new BadRequestException("仅支持 PDF 和 UTF-8 TXT 文件");
