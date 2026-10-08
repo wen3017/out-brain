@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { safeErrorMeta } from "../../common/safe-error.js";
 import { timeContext } from "../../common/time-context.js";
 import { searchPolicy } from "../search/search-policy.js";
-import { documentOverviewContext, isDocumentOverviewRequest } from "./document-context.js";
+import { documentInventoryContext, documentOverviewContext, isDocumentOverviewRequest } from "./document-context.js";
 
 @Injectable()
 export class AgentRuntimeService extends AgentRuntimePort implements OnModuleInit {
@@ -59,6 +59,10 @@ export class AgentRuntimeService extends AgentRuntimePort implements OnModuleIni
       ? await this.retrieval.overview(input.userId, input.conversationId)
       : null;
     if (documentOverview) systemPrompt += documentOverviewContext(documentOverview);
+    else {
+      const uploaded = await this.prisma.fileAsset.findMany({ where: { userId: input.userId, conversationId: input.conversationId, kind: "PDF" }, select: { id: true, originalName: true, status: true, _count: { select: { pages: true } } } });
+      if (uploaded.length) systemPrompt += documentInventoryContext(uploaded.map(file => ({ id: file.id, name: file.originalName, status: file.status, pages: file._count.pages })));
+    }
     const presentationStates=await this.prisma.presentation.findMany({where:{conversationId:input.conversationId,conversation:{userId:input.userId}},orderBy:{createdAt:"desc"},take:10,select:{id:true,title:true,status:true,progress:true}});
     if(presentationStates.length)systemPrompt+=`当前数据库中的 PPT 状态（本轮实时读取，优先于历史聊天里的排队信息）：${JSON.stringify(presentationStates)}。READY 表示文件已生成，可在当前页面产物区预览下载，禁止说仍在排队或尚未生成。只报告状态与入口；未读取最终文件时不得保证其中每项内容准确，不得虚构加速、推送或权限申请流程。`;
     const timelySearch = searchEnabled;

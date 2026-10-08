@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { RetrievalService } from "../src/modules/files/retrieval.service.js";
 import { AgentRuntimeService } from "../src/modules/agent/agent-runtime.service.js";
-import { documentOverviewContext, isDocumentOverviewRequest } from "../src/modules/agent/document-context.js";
+import { documentInventoryContext, documentOverviewContext, isDocumentOverviewRequest } from "../src/modules/agent/document-context.js";
 
 describe("reading an uploaded document without search terms", () => {
   it("formats the live inventory and excerpts for a generic read request", () => {
     expect(isDocumentOverviewRequest("读一下当前文件")).toBe(true);
+    expect(isDocumentOverviewRequest("读取一下当前文件")).toBe(true);
+    expect(isDocumentOverviewRequest("请阅读这份论文")).toBe(true);
+    expect(isDocumentOverviewRequest("分析当前PDF")).toBe(true);
     const context = documentOverviewContext({ files: [
       { id: "one", name: "ready.pdf", status: "READY", pages: 2 },
       { id: "two", name: "broken.pdf", status: "FAILED", pages: 0 },
@@ -17,6 +20,7 @@ describe("reading an uploaded document without search terms", () => {
     expect(context).toContain("禁止声称本会话没有上传文件");
     expect(context).toContain("Product plan");
     expect(context).toContain("并非全文");
+    expect(documentInventoryContext([{ id: "one", name: "ready.pdf", status: "READY", pages: 2 }])).toContain("禁止声称本会话没有上传文件");
   });
   it("samples a long document across its pages within a bounded response", async () => {
     const pages = Array.from({ length: 200 }, (_, index) => ({ pageNo: index + 1 }));
