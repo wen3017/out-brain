@@ -6,6 +6,7 @@ import { requestSecurity } from "../src/common/request-security.js";
 import { boundedUploadStorage } from "../src/modules/files/upload-storage.js";
 import { UPLOAD_LIMITS } from "@nbboss/contracts";
 import { RequestLimits, AuthRateGuard, AiQuotaGuard } from "../src/common/request-limits.js";
+import { resourceLimit } from "../src/common/resource-limits.js";
 const saved = { ...process.env };
 afterEach(() => { process.env = { ...saved }; vi.restoreAllMocks(); });
 const valid = () => ({ JWT_ACCESS_SECRET: "a".repeat(40), JWT_REFRESH_SECRET: "b".repeat(40), DATABASE_URL: "postgresql://localhost/db", REDIS_URL: "redis://localhost", WEB_ORIGIN: "http://localhost:3000", STORAGE_ROOT: resolve("uploads"), LLM_ENABLED: "false" });
@@ -41,6 +42,22 @@ describe("browser request protection", () => {
   });
 });
 describe("request and upload bounds", () => {
+  it("uses positive defaults for missing, empty and whitespace-only quota settings", async () => {
+    for (const value of [undefined, "", " "]) {
+      if (value === undefined) delete process.env.AUTH_RATE_LIMIT; else process.env.AUTH_RATE_LIMIT = value;
+      expect(resourceLimit("AUTH_RATE_LIMIT", 100)).toBe(100);
+      const limits = { consume: vi.fn() };
+      await new AuthRateGuard(limits as any).canActivate({ switchToHttp: () => ({ getRequest: () => ({ path: "/api/auth/login", ip: "127.0.0.1", body: {} }), getResponse: () => ({}) }) } as any);
+      expect(limits.consume.mock.calls[0][1]).toBe(100);
+    }
+    process.env.AUTH_RATE_LIMIT = "250";
+    expect(resourceLimit("AUTH_RATE_LIMIT", 100)).toBe(250);
+    process.env.AUTH_RATE_LIMIT = "0";
+    expect(() => resourceLimit("AUTH_RATE_LIMIT", 100)).toThrow("AUTH_RATE_LIMIT");
+    process.env.AI_DAILY_REQUEST_LIMIT = ""; process.env.USER_STORAGE_MB = " ";
+    expect(resourceLimit("AI_DAILY_REQUEST_LIMIT", 200)).toBe(200);
+    expect(resourceLimit("USER_STORAGE_MB", 1024)).toBe(1024);
+  });
   it("returns a retry time when over quota and fails closed on Redis outage", async () => {
     const redis = { connect: vi.fn(), client: { eval: vi.fn().mockResolvedValue([3, 50]) } }; const res = { setHeader: vi.fn() };
     await expect(new RequestLimits(redis as any).consume("account", 2, 60, res as any, "limited")).rejects.toMatchObject({ status: 429 });

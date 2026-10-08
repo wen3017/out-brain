@@ -1,5 +1,6 @@
 import { extractPdf } from "./pdf-extraction.js";
 import { UPLOAD_LIMITS } from "@nbboss/contracts";
+import { resourceLimit } from "../../common/resource-limits.js";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -46,7 +47,7 @@ export class FilesService {
           const existing = await tx.fileAsset.findFirst({ where: { userId, conversationId, kind, sha256: hash }, orderBy: { createdAt: "asc" } });
           if (existing) { assets.push(existing); continue; }
           size += file.size;
-          if (size > Number(process.env.USER_STORAGE_MB ?? 1024) * 1024 * 1024) throw new BadRequestException("账号上传存储额度不足，请删除不再需要的文件或联系维护人员");
+          if (size > resourceLimit("USER_STORAGE_MB", 1024) * 1024 * 1024) throw new BadRequestException("账号上传存储额度不足，请删除不再需要的文件或联系维护人员");
           const id = randomUUID(); const dir = join(this.root, userId, conversationId);
           await mkdir(dir, { recursive: true });
           const storagePath = join(dir, `${id}${ext}`); writtenPaths.push(storagePath);

@@ -30,11 +30,9 @@ if ($Service -eq 'smtp') {
     $values.SEARCH_ENABLED = 'true'
     $values.SEARCH_PROVIDER = 'tavily'
 }
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetAccessRuleProtection($true, $false)
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-Set-Acl -LiteralPath $directory -AclObject $acl
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& icacls.exe $directory '/inheritance:r' '/grant:r' ('*' + $sid + ':(OI)(CI)F') *> $null
+if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict the local configuration directory.' }
 [IO.File]::WriteAllText($path, ($values | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 Write-Host 'Saved encrypted credentials outside the project. Run start.cmd stop then start.cmd to apply.'
 Write-Host 'No email was sent by this configuration command.'

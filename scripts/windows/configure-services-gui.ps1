@@ -8,11 +8,9 @@ $configPath = Join-Path $directory 'services.json'
 
 function Save-Settings([hashtable]$Changes) {
     [void][IO.Directory]::CreateDirectory($directory)
-    $acl = New-Object Security.AccessControl.DirectorySecurity
-    $acl.SetAccessRuleProtection($true, $false)
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-    Set-Acl -LiteralPath $directory -AclObject $acl
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    & icacls.exe $directory '/inheritance:r' '/grant:r' ('*' + $sid + ':(OI)(CI)F') *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict the local configuration directory.' }
     $values = @{}
     if (Test-Path -LiteralPath $configPath) {
         foreach ($property in ([IO.File]::ReadAllText($configPath) | ConvertFrom-Json).PSObject.Properties) { $values[$property.Name] = $property.Value }

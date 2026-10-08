@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, HttpException, Injectable, ServiceUnavai
 import { createHash } from "node:crypto";
 import type { Request, Response } from "express";
 import { RedisService } from "../infra/redis.service.js";
+import { resourceLimit } from "./resource-limits.js";
 
 @Injectable()
 export class RequestLimits {
@@ -28,7 +29,7 @@ export class AuthRateGuard implements CanActivate {
     const res = context.switchToHttp().getResponse<Response>();
     const action = req.path.split("/").at(-1);
     if (!["login", "register", "password"].includes(action ?? "")) return true;
-    await this.limits.consume(`auth-ip:${req.ip}`, Number(process.env.AUTH_RATE_LIMIT ?? 100), 900, res, "操作过于频繁，请稍后再试");
+    await this.limits.consume(`auth-ip:${req.ip}`, resourceLimit("AUTH_RATE_LIMIT", 100), 900, res, "操作过于频繁，请稍后再试");
     const account = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : undefined;
     if (account) await this.limits.consume(`auth-account:${action}:${account}`, 20, 900, res, "该账号尝试次数过多，请 15 分钟后再试");
     return true;
@@ -47,7 +48,7 @@ export class AiQuotaGuard implements CanActivate {
     await this.limits.consume(`ai-burst:${req.user.id}`, 20, 60, res, "处理请求过于频繁，请稍后重试");
     const now = new Date();
     const ttl = Math.ceil((Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1)-now.valueOf())/1000);
-    await this.limits.consume(`ai-daily:${req.user.id}:${now.toISOString().slice(0,10)}`, Number(process.env.AI_DAILY_REQUEST_LIMIT ?? 200), ttl, res, "今日 AI 处理请求额度已用完，请明日再试或联系维护人员");
+    await this.limits.consume(`ai-daily:${req.user.id}:${now.toISOString().slice(0,10)}`, resourceLimit("AI_DAILY_REQUEST_LIMIT", 200), ttl, res, "今日 AI 处理请求额度已用完，请明日再试或联系维护人员");
     return true;
   }
 }

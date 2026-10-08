@@ -129,10 +129,23 @@ try {
     Write-Host "API health: http://localhost:$apiPort/api/health/system"
     Write-Host "Logs: $script:LogRoot"
     Write-Host 'To stop all project services and retain data, run start.cmd stop.'
-    if ($externalLlm) {
-        Write-Host ('Model: ' + $externalLlm.LLM_MODEL + ' (credentials loaded from outside the project).')
-    } elseif (!$values.ContainsKey('LLM_API_KEY') -or !$values.LLM_API_KEY) {
-        Write-Host 'LLM_API_KEY is empty. Add your API key in .env and restart to enable AI features.'
+    # Existing processes retain their startup configuration. Report the running
+    # API's capability instead of inferring it from the current .env file.
+    try {
+        $capabilities = Invoke-RestMethod -Uri "http://127.0.0.1:$apiPort/api/health/capabilities" -TimeoutSec 5
+        if ($capabilities.model) {
+            Write-Host 'AI model configuration: enabled in the running API (provider connectivity is not tested here).'
+            if ($newServices.Contains('api') -and $externalLlm) {
+                Write-Host ('Model: ' + $externalLlm.LLM_MODEL + ' (encrypted configuration outside the project).')
+            }
+        } else {
+            Write-Host 'AI model configuration: disabled in the running API. Configure the model and set LLM_ENABLED=true, then stop and start the application.'
+        }
+        if (!$newServices.Contains('api')) {
+            Write-Host 'Existing API process reused. Configuration changes require a stop/start.'
+        }
+    } catch {
+        Write-Host 'Could not read the running AI configuration. Check /api/health/capabilities.'
     }
     if (!$NoOpen) { Start-Process "http://localhost:$webPort" }
 } catch {
