@@ -68,6 +68,9 @@ export async function extractPdf(buffer: Buffer, progress?: (page: number, total
           if(!recognized || result.data.confidence < 50 || (hasImages && recognized.replace(/\s/g, "").length <= originalLength + 10)){ qualityStatus="REVIEW_REQUIRED";qualityMessage=`第 ${pageNo} 页 OCR 结果不可靠，可能遗漏正文，请核对原页或上传更清晰版本`; }
         } finally { if (timer) clearTimeout(timer); }
       }
+      // Some PDF text layers contain NUL characters, which PostgreSQL rejects
+      // in UTF-8 text fields. Remove them before storing pages or chunks.
+      text = text.replace(/\u0000/g, "");
       if(!text.trim()){qualityStatus="UNREADABLE";qualityMessage=`第 ${pageNo} 页未识别到文字，请核对是否为空白或模糊页面`;}
       pages.push({ pageNo, text, extractionMethod, qualityStatus, qualityMessage });
       page.cleanup();

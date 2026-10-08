@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { safeErrorMeta } from "../../common/safe-error.js";
 import { timeContext } from "../../common/time-context.js";
 import { searchPolicy } from "../search/search-policy.js";
+import { documentOverviewContext, isDocumentOverviewRequest } from "./document-context.js";
 
 @Injectable()
 export class AgentRuntimeService extends AgentRuntimePort implements OnModuleInit {
@@ -54,6 +55,10 @@ export class AgentRuntimeService extends AgentRuntimePort implements OnModuleIni
     const searchEnabled = input.webSearch && this.search.available();
     const memoryRequired = this.needsMemory(input.content);
     let systemPrompt = this.systemPrompt(conversation.mode, searchEnabled, input.webSearch && !searchEnabled, memoryRequired);
+    const documentOverview = isDocumentOverviewRequest(input.content)
+      ? await this.retrieval.overview(input.userId, input.conversationId)
+      : null;
+    if (documentOverview) systemPrompt += documentOverviewContext(documentOverview);
     const presentationStates=await this.prisma.presentation.findMany({where:{conversationId:input.conversationId,conversation:{userId:input.userId}},orderBy:{createdAt:"desc"},take:10,select:{id:true,title:true,status:true,progress:true}});
     if(presentationStates.length)systemPrompt+=`当前数据库中的 PPT 状态（本轮实时读取，优先于历史聊天里的排队信息）：${JSON.stringify(presentationStates)}。READY 表示文件已生成，可在当前页面产物区预览下载，禁止说仍在排队或尚未生成。只报告状态与入口；未读取最终文件时不得保证其中每项内容准确，不得虚构加速、推送或权限申请流程。`;
     const timelySearch = searchEnabled;
@@ -161,6 +166,12 @@ export class AgentRuntimeService extends AgentRuntimePort implements OnModuleIni
         await this.prisma.toolExecution.create({data:{runId:run.id,toolCallId,toolName:"search_web",arguments:{query:input.content},result:{count:searchCaptures[0].results.length},status:"COMPLETED",endedAt:new Date()}});
         emit({type:"tool.started",runId:run.id,toolCallId,toolName:"search_web"});emit({type:"tool.completed",runId:run.id,toolCallId,toolName:"search_web",isError:false});
       }
+      if (documentOverview) {
+        const toolCallId = `document-preflight-${run.id}`;
+        await this.prisma.toolExecution.create({ data: { runId: run.id, toolCallId, toolName: "retrieve_documents", arguments: { query: "*" }, result: { files: documentOverview.files.length, sampledPages: documentOverview.sampledPages, totalPages: documentOverview.totalPages }, status: "COMPLETED", endedAt: new Date() } });
+        emit({ type: "tool.started", runId: run.id, toolCallId, toolName: "retrieve_documents" });
+        emit({ type: "tool.completed", runId: run.id, toolCallId, toolName: "retrieve_documents", isError: false });
+      }
       await agent.prompt(input.content);
       if (maxToolTurnsReached) throw new Error("AGENT_MAX_TOOL_TURNS");
       if (this.models.consumeTimeout(input.conversationId)) throw new Error("PROVIDER_TIMEOUT");
@@ -215,7 +226,7 @@ export class AgentRuntimeService extends AgentRuntimePort implements OnModuleIni
         const files = await this.prisma.fileAsset.findMany({where:{userId:input.userId,conversationId:input.conversationId,kind:"PDF"},select:{originalName:true,status:true,errorMessage:true}});
         const incomplete = files.filter(file => file.status !== "READY");
         const warning = incomplete.length ? `材料完整性提示（回答必须说明，不能声称已完整阅读）：${JSON.stringify(incomplete)}\n` : "";
-        const broadRequest = /^(?:请|帮我|你|先|给我|能否|可以)?(?:读(?:一下|一遍)?|看(?:一下|一遍)?|浏览|总结|概括|介绍)(?:下|一下)?(?:当前|这份|这个|已上传的|上传的|会话里的)?(?:文件|文档|PDF|资料)(?:内容)?[。！!?？\s]*$/i.test(input.content.trim());
+        const broadRequest = isDocumentOverviewRequest(input.content);
         if (broadRequest || /^\*+$/.test(String(params.query).trim())) {
           const overview = await this.retrieval.overview(input.userId, input.conversationId);
           const inventory = overview.files.map(file => `${file.name}（${file.status}，${file.pages} 页）`).join("；");

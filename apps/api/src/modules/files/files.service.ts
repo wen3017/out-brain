@@ -132,7 +132,10 @@ export class FilesService {
       // making BullMQ retry a job whose source no longer exists.
       await this.prisma.fileAsset.updateMany({ where: { id: fileId }, data: { status: partial ? "PARTIAL" : "READY", errorMessage: parseNotice } });
     } catch (error) {
-      const message = error instanceof Error ? error.message.slice(0, 500) : "解析失败";
+      const rawMessage = error instanceof Error ? error.message : "";
+      const message = /^(TXT 文件为空|PDF 不得超过 200 页|PDF 未识别到有效文字|OCR 语言包下载失败|第 \d+ 页(?:需要 OCR| OCR 超时))/.test(rawMessage)
+        ? rawMessage.slice(0, 200)
+        : "文件解析失败，请重试；若持续失败，请检查文件是否损坏";
       const updated = await this.prisma.fileAsset.updateMany({ where: { id: fileId }, data: { status: "FAILED", errorMessage: message } });
       if (updated.count) await this.prisma.conversation.updateMany({ where: { id: asset.conversationId, mode: "MEETING" }, data: { meetingStatus: "FAILED", meetingErrorMessage: `会议文件解析失败：${message}` } });
       if (updated.count) throw error;

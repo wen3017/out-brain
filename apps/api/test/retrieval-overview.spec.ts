@@ -1,8 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { RetrievalService } from "../src/modules/files/retrieval.service.js";
 import { AgentRuntimeService } from "../src/modules/agent/agent-runtime.service.js";
+import { documentOverviewContext, isDocumentOverviewRequest } from "../src/modules/agent/document-context.js";
 
 describe("reading an uploaded document without search terms", () => {
+  it("formats the live inventory and excerpts for a generic read request", () => {
+    expect(isDocumentOverviewRequest("读一下当前文件")).toBe(true);
+    const context = documentOverviewContext({ files: [
+      { id: "one", name: "ready.pdf", status: "READY", pages: 2 },
+      { id: "two", name: "broken.pdf", status: "FAILED", pages: 0 },
+    ], totalPages: 2, sampledPages: 1, excerpts: [
+      { fileId: "one", fileName: "ready.pdf", pageStart: 1, pageEnd: 1, content: "Product plan", score: 0 },
+    ] });
+    expect(context).toContain("ready.pdf");
+    expect(context).toContain("broken.pdf");
+    expect(context).toContain("禁止声称本会话没有上传文件");
+    expect(context).toContain("Product plan");
+    expect(context).toContain("并非全文");
+  });
   it("samples a long document across its pages within a bounded response", async () => {
     const pages = Array.from({ length: 200 }, (_, index) => ({ pageNo: index + 1 }));
     const chunks = pages.map(page => ({ fileId: "file", pageStart: page.pageNo, pageEnd: page.pageNo, content: `page ${page.pageNo} `.repeat(100), charStart: 0 }));
