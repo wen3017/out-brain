@@ -2,7 +2,7 @@ const API = import.meta.env.VITE_API_URL ?? "/api";
 let refreshRequest: Promise<boolean> | undefined;
 
 async function authenticatedFetch(path: string, options: RequestInit): Promise<Response> {
-  const request = () => fetch(`${API}${path}`, { ...options, credentials: "include", headers: { ...(options.body instanceof FormData ? {} : { "content-type": "application/json" }), ...options.headers } });
+  const request = () => fetch(`${API}${path}`, { ...options, cache: options.cache ?? (!options.method || options.method.toUpperCase() === "GET" ? "no-store" : "default"), credentials: "include", headers: { ...(options.body instanceof FormData ? {} : { "content-type": "application/json" }), ...options.headers } });
   let response = await request();
   if (response.status === 401 && (!path.startsWith("/auth/") || path === "/auth/password")) {
     refreshRequest ??= fetch(`${API}/auth/refresh`, { method: "POST", credentials: "include" })

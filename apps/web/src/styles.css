@@ -344,31 +344,6 @@ button {
   opacity: .4;
 }
 
-.attachment-row {
-  display: flex;
-  gap: 6px;
-  overflow: auto;
-  padding-bottom: 6px;
-}
-
-.file-chip {
-  font-size: 11px;
-  background: #f1f1f5;
-  padding: 5px 8px;
-  border-radius: 7px;
-  display: flex;
-  gap: 5px;
-  white-space: nowrap;
-}
-
-.file-chip.ready {
-  color: #147d50;
-}
-
-.file-chip.failed {
-  color: #c33535;
-}
-
 .artifact-content {
   padding: 0 12px;
   overflow: auto;
@@ -1059,10 +1034,6 @@ button {
   white-space: normal;
 }
 
-.file-chip.partial {
-  color: #986600;
-}
-
 /* Light-blue workspace. Content and controls take precedence over decoration. */
 
 :root {
@@ -1593,6 +1564,20 @@ button, a {
 
 .chat-header>div {
   min-width: 0;
+}
+
+.chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.chat-header-actions>.ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .chat-header h2 {
@@ -2876,6 +2861,13 @@ input[type=checkbox] {
   }
   .chat-header h2 {
     font-size: 12px;
+  }
+  .chat-header-actions {
+    gap: 2px;
+  }
+  .chat-header-actions>.ghost {
+    font-size: 10px;
+    padding: 6px 3px;
   }
   .artifact-toggle {
     font-size: 10px;

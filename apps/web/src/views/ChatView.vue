@@ -15,7 +15,7 @@ type PresentationItem = { id:string; title:string; status:"PENDING"|"PROCESSING"
 type Detail = { id:string; title:string; mode:string; meetingStatus?:"PROCESSING"|"READY"|"FAILED"; meetingErrorMessage?:string; runs?:Array<{id:string;status:string;errorCode?:string}>; messages:Message[]; files:FileItem[]; meetings:Meeting[]; presentations:PresentationItem[] };
 
 const route = useRoute(); const router = useRouter();
-const conversations = ref<Conversation[]>([]); const detail = ref<Detail|null>(null); const content = ref(""); const webSearch = ref<"auto"|"on"|"off">("auto"); const streaming = ref(false); const streamText = ref(""); const runId = ref(""); const error = ref(""); const fileInput = ref<HTMLInputElement>(); const scroll = ref<HTMLElement>(); const artifactOpen = ref(true); let aborter: AbortController | null = null; let streamEpoch = 0;
+const conversations = ref<Conversation[]>([]); const detail = ref<Detail|null>(null); const content = ref(""); const webSearch = ref<"auto"|"on"|"off">("auto"); const streaming = ref(false); const streamText = ref(""); const runId = ref(""); const error = ref(""); const fileInput = ref<HTMLInputElement>(); const scroll = ref<HTMLElement>(); const artifactOpen = ref(true); let aborter: AbortController | null = null; let streamEpoch = 0; let detailRequestSeq = 0;
 const draftKey = (id:string) => `nbboss-draft:${id}`;
 function readDraft(id?:string) { return id ? sessionStorage.getItem(draftKey(id)) ?? "" : ""; }
 const capabilities=ref({search:false,smtp:false,embedding:false,vision:false});
@@ -31,7 +31,7 @@ const filteredConversations = computed(() => conversations.value.filter(item => 
 const activeTools = ref<Array<{ id:string; name:string; status:"RUNNING"|"COMPLETED"|"FAILED" }>>([]);
 function toolLabel(name:string) { return ({ read_meetings:"读取当前会议", retrieve_documents:"检索会话文件", retrieve_memory:"检索长期记忆", search_web:"联网搜索", analyze_meeting:"分析会议", create_todos:"创建待办", generate_presentation:"生成 PPT" } as Record<string,string>)[name] ?? name; }
 async function loadList() { listLoading.value=true; listError.value=""; try { conversations.value=await api<Conversation[]>("/conversations"); } catch(e) { listError.value=(e as Error).message; } finally { listLoading.value=false; } }
-async function loadDetail() { if (!currentId.value) { detail.value = null; return; } const id = currentId.value; const result = await api<Detail>(`/conversations/${id}`); if (id !== currentId.value || disposed) return; detail.value = result; const savedDraft=readDraft(id);const submittedAt=Number(sessionStorage.getItem(`${draftKey(id)}:submittedAt`));if(savedDraft && submittedAt && result.messages.some(m=>m.role==="USER" && m.content===savedDraft && m.createdAt && new Date(m.createdAt).valueOf()>=submittedAt-1000)){sessionStorage.removeItem(draftKey(id));sessionStorage.removeItem(`${draftKey(id)}:submittedAt`);if(content.value===savedDraft)content.value="";} if (!aborter) { const run = result.runs?.[0]; streaming.value = run?.status === "RUNNING"; runId.value = streaming.value ? run!.id : ""; } if (isBusy(result)) void pollPresentations(); await nextTick(); scroll.value?.scrollTo({ top: scroll.value.scrollHeight }); }
+async function loadDetail() { const requestSeq = ++detailRequestSeq; if (!currentId.value) { detail.value = null; return; } const id = currentId.value; const result = await api<Detail>(`/conversations/${id}`); if (requestSeq !== detailRequestSeq || id !== currentId.value || disposed) return; detail.value = result; const savedDraft=readDraft(id);const submittedAt=Number(sessionStorage.getItem(`${draftKey(id)}:submittedAt`));if(savedDraft && submittedAt && result.messages.some(m=>m.role==="USER" && m.content===savedDraft && m.createdAt && new Date(m.createdAt).valueOf()>=submittedAt-1000)){sessionStorage.removeItem(draftKey(id));sessionStorage.removeItem(`${draftKey(id)}:submittedAt`);if(content.value===savedDraft)content.value="";} if (!aborter) { const run = result.runs?.[0]; streaming.value = run?.status === "RUNNING"; runId.value = streaming.value ? run!.id : ""; } if (isBusy(result)) void pollPresentations(); await nextTick(); scroll.value?.scrollTo({ top: scroll.value.scrollHeight }); }
 async function create(mode:"CHAT"|"MEETING") {
   if (creating.value) return;
   creating.value = true; error.value = "";
@@ -101,7 +101,8 @@ async function pollPresentations() {
   } catch(e) { if(epoch===pollEpoch) error.value=e instanceof Error?e.message:'状态刷新失败，请刷新页面重试'; }
   finally { if(epoch===pollEpoch) pollingId=undefined; }
 }
-onUnmounted(()=>{disposed=true;streamEpoch++;pollEpoch++;aborter?.abort();});
+function refreshOnReturn() { if (document.visibilityState === "visible" && currentId.value && !streaming.value && !aborter) { void refreshDetail(); void loadList(); } }
+onUnmounted(()=>{disposed=true;streamEpoch++;pollEpoch++;detailRequestSeq++;aborter?.abort();window.removeEventListener("focus",refreshOnReturn);document.removeEventListener("visibilitychange",refreshOnReturn);});
 async function retryFile(id:string) { try { await api('/files/'+id+'/retry',{method:'POST'}); await loadDetail(); } catch(e) { error.value=(e as Error).message; } }
 async function retryPpt(id:string) { try { await api('/presentations/'+id+'/retry',{method:'POST'}); await loadDetail(); } catch(e) { error.value=(e as Error).message; } }
 async function retryMail(id:string, inboxChecked=false) { try { const result=await api<{queued:boolean;reason?:string;requiresInboxCheck?:boolean}>('/conversations/'+currentId.value+'/meetings/emails/'+id+'/retry',{method:'POST',body:JSON.stringify({inboxChecked})}); if(result.requiresInboxCheck && confirm("邮件可能已被接收。请先核对收件箱；确认仍需再次投递？")) return retryMail(id,true); if(!result.queued) error.value=result.reason??'未提交'; await loadDetail(); } catch(e) { error.value=(e as Error).message; } }
@@ -113,13 +114,13 @@ watch(currentId, async(id,oldId)=>{
   content.value=readDraft(id);pollEpoch++;pollingId=undefined;await refreshDetail();
 });
 async function refreshDetail() { detailLoading.value=true; const id=currentId.value; try { await loadDetail(); if(id===currentId.value)error.value=""; } catch(e) { if(id===currentId.value)error.value=(e as Error).message; } finally { if(id===currentId.value)detailLoading.value=false; } }
-onMounted(async()=>{content.value=readDraft(currentId.value);if(window.innerWidth<=1100)artifactOpen.value=false;await Promise.all([loadList(),refreshDetail(),api<typeof capabilities.value>("/health/capabilities").then(value=>capabilities.value=value).catch(()=>{})]);});
+onMounted(async()=>{content.value=readDraft(currentId.value);if(window.innerWidth<=1100)artifactOpen.value=false;window.addEventListener("focus",refreshOnReturn);document.addEventListener("visibilitychange",refreshOnReturn);await Promise.all([loadList(),refreshDetail(),api<typeof capabilities.value>("/health/capabilities").then(value=>capabilities.value=value).catch(()=>{})]);});
 </script>
 
 <template>
 <div class="workspace" :class="{ 'with-artifacts': detail && artifactOpen }" @keydown.esc="artifactOpen=false">
   <section class="history-pane">
-    <div class="pane-title">会话记录 <span class="count-pill">{{ conversations.length }}</span><button class="ghost" title="返回会话首页" @click="router.push('/')"><Plus :size="16"/></button></div>
+    <div class="pane-title">会话记录 <span class="count-pill">{{ conversations.length }}</span><button class="ghost" title="新建普通对话" aria-label="新建普通对话" :disabled="creating" @click="create('CHAT')"><Plus :size="16"/></button></div>
     <label class="history-search"><Search :size="15"/><input v-model="historySearch" placeholder="搜索会话" aria-label="搜索会话"/></label>
     <div class="history-list"><div v-for="item in filteredConversations" :key="item.id" :class="['history-row',{selected:item.id===currentId}]"><button class="history-item" :title="item.title" @click="router.push(`/chat/${item.id}`)"><MessageSquare v-if="item.mode==='CHAT'" :size="15"/><Users v-else :size="15"/><span>{{ item.title }}</span></button><button class="history-delete" :aria-label="`删除会话：${item.title}`" @click="remove(item.id)"><Trash2 :size="14"/></button></div></div>
     <div v-if="!listLoading && !listError && !filteredConversations.length" class="history-empty"><MessageSquare :size="22"/><p>{{ historySearch ? '没有找到相关会话' : '暂无会话记录' }}</p><small>{{ historySearch ? '试试其他关键词' : '新建会话后，记录会保存在这里' }}</small></div>
@@ -138,7 +139,7 @@ onMounted(async()=>{content.value=readDraft(currentId.value);if(window.innerWidt
       </div>
     </template>
     <template v-else>
-      <header class="chat-header"><div><h2>{{ detail.title }}</h2><span class="badge">{{ detail.mode === 'MEETING' ? '会议分析' : '普通对话' }}</span></div><button class="ghost artifact-toggle" :aria-expanded="artifactOpen" @click="artifactOpen=!artifactOpen"><PanelRight :size="16"/>{{ artifactOpen?'隐藏':'显示' }}产物</button></header>
+      <header class="chat-header"><div><h2>{{ detail.title }}</h2><span class="badge">{{ detail.mode === 'MEETING' ? '会议分析' : '普通对话' }}</span></div><div class="chat-header-actions"><button class="ghost" title="刷新当前会话" @click="refreshDetail"><span>刷新</span></button><button class="ghost" :disabled="creating" @click="create('CHAT')"><Plus :size="16"/> 新对话</button><button class="ghost artifact-toggle" :aria-expanded="artifactOpen" @click="artifactOpen=!artifactOpen"><PanelRight :size="16"/>{{ artifactOpen?'隐藏':'显示' }}产物{{ detail.files.length ? ` (${detail.files.length})` : '' }}</button></div></header>
       <div ref="scroll" class="messages">
         <div v-if="!detail.messages.length" class="conversation-empty"><MessageSquare :size="30"/><h3>{{ detail.mode==='MEETING'?'上传会议原文开始分析':'开始你的第一个问题' }}</h3><p>{{ detail.mode==='MEETING'?'支持多个 UTF-8 TXT（每份最多 120,000 字符），也可以上传 PDF 作为背景。':'可以上传 PDF 作为本次会话的知识背景。' }}</p></div>
         <article v-for="message in detail.messages.filter(m=>m.role==='USER'||m.role==='ASSISTANT')" :key="message.id" :class="['message',message.role.toLowerCase()]">
@@ -149,7 +150,6 @@ onMounted(async()=>{content.value=readDraft(currentId.value);if(window.innerWidt
         <p v-if="error" class="error callout">{{ error }}</p>
       </div>
       <div class="composer-wrap">
-        <div v-if="detail.files.length" class="attachment-row"><span v-for="file in detail.files" :key="file.id" :class="['file-chip',file.status.toLowerCase()]" :title="file.errorMessage"><FileText :size="14"/>{{ file.originalName }} · {{ file.status }}</span></div>
         <div class="composer"><textarea v-model="content" rows="2" placeholder="输入消息，Shift + Enter 换行" @keydown.enter.exact="handleEnter"></textarea><div class="composer-actions"><div><input ref="fileInput" hidden type="file" multiple :accept="detail.mode==='MEETING'?'.pdf,.txt':'.pdf'" @change="upload"/><button title="上传文件" @click="fileInput?.click()"><Paperclip :size="18"/></button><label class="search-mode" :title="capabilities.search?'自动模式会检索时效性问题；关闭模式不联网':'联网未配置：时效性问题会提示配置，不会伪造实时结果'"><Globe2 :size="18"/><select v-model="webSearch" aria-label="联网模式"><option value="auto">自动联网</option><option value="on">开启联网</option><option value="off">关闭联网</option></select><small v-if="!capabilities.search">未配置</small></label><button title="生成 PPT" @click="generatePpt"><Presentation :size="18"/> PPT</button><button v-if="detail.mode==='MEETING'" :disabled="detail.meetingStatus==='PROCESSING'" @click="reanalyze"><Users :size="18"/> {{detail.meetingStatus==='PROCESSING'?'分析中':'重新分析'}}</button></div><button v-if="streaming" class="send" aria-label="停止生成" @click="stop"><Square :size="17"/></button><button v-else class="send" aria-label="发送消息" :disabled="!content.trim()" @click="send"><Send :size="17"/></button></div></div>
         <small>AI 可能犯错。文件引用和行动项请结合原文核对；对话与上传内容会发送至已配置的外部模型服务处理。</small>
       </div>
