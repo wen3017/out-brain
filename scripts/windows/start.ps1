@@ -1,4 +1,4 @@
-param([switch]$NoOpen)
+﻿param([switch]$NoOpen)
 . (Join-Path $PSScriptRoot 'common.ps1')
 $launcherLock = $null
 $newServices = New-Object 'System.Collections.Generic.List[string]'
@@ -30,7 +30,7 @@ try {
     $redisExe = Join-Path $script:LocalRoot 'redis\redis-server.exe'
     $vite = Join-Path $script:ProjectRoot 'apps\web\node_modules\vite\bin\vite.js'
     foreach ($required in @($pgCtl, (Join-Path $pgData 'PG_VERSION'), $redisExe, (Join-Path $script:LocalRoot 'redis.conf'), $vite)) {
-        if (!(Test-Path -LiteralPath $required)) { throw 'The local environment is incomplete. Run setup.cmd first.' }
+        if (!(Test-Path -LiteralPath $required)) { throw 'The local environment is incomplete. Run start.cmd setup first.' }
     }
     Assert-ServicePort 'postgres' $pgPort
     Assert-ServicePort 'redis' $redisPort
@@ -95,6 +95,7 @@ try {
     }
     foreach ($name in @('api', 'worker')) {
         if (!(Get-ManagedRecord $name)) {
+            Archive-ServiceLogs $name
             Write-Host "Starting $name (model: $env:LLM_MODEL)..."
             $env:WORKER_MODE = if ($name -eq 'worker') { 'true' } else { 'false' }
             $process = Start-Process -FilePath $node -ArgumentList @('dist/main.js') -WorkingDirectory $apiDirectory -WindowStyle Hidden -RedirectStandardOutput (Join-Path $script:LogRoot "$name.stdout.log") -RedirectStandardError (Join-Path $script:LogRoot "$name.stderr.log") -PassThru
@@ -109,6 +110,7 @@ try {
         }
     }
     if (!(Get-ManagedRecord 'web')) {
+        Archive-ServiceLogs 'web'
         Write-Host 'Starting Web...'
         $env:WORKER_MODE = 'false'
         $process = Start-Process -FilePath $node -ArgumentList @('node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', "$webPort", '--strictPort') -WorkingDirectory (Join-Path $script:ProjectRoot 'apps\web') -WindowStyle Hidden -RedirectStandardOutput (Join-Path $script:LogRoot 'web.stdout.log') -RedirectStandardError (Join-Path $script:LogRoot 'web.stderr.log') -PassThru
@@ -118,15 +120,15 @@ try {
     Write-Host 'Waiting for application readiness...'
     Wait-ServicePort 'api' $apiPort
     Wait-ServicePort 'web' $webPort
-    Wait-ServiceHttp 'api' "http://127.0.0.1:$apiPort/api/health/ready"
+    Wait-ServiceHttp 'api' "http://127.0.0.1:$apiPort/api/health/system"
     Wait-ServiceHttp 'web' "http://127.0.0.1:$webPort/"
     Start-Sleep -Seconds 2
     if (!(Get-ManagedRecord 'worker')) { throw 'Worker exited during startup. Check .local\logs\worker.stderr.log.' }
     Write-Host ''
     Write-Host "Ready: http://localhost:$webPort"
-    Write-Host "API health: http://localhost:$apiPort/api/health/ready"
+    Write-Host "API health: http://localhost:$apiPort/api/health/system"
     Write-Host "Logs: $script:LogRoot"
-    Write-Host 'To stop all project services and retain data, run stop.cmd.'
+    Write-Host 'To stop all project services and retain data, run start.cmd stop.'
     if ($externalLlm) {
         Write-Host ('Model: ' + $externalLlm.LLM_MODEL + ' (credentials loaded from outside the project).')
     } elseif (!$values.ContainsKey('LLM_API_KEY') -or !$values.LLM_API_KEY) {

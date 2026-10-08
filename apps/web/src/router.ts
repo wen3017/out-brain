@@ -4,6 +4,8 @@ import ChatView from "./views/ChatView.vue";
 import TodosView from "./views/TodosView.vue";
 import MemoriesView from "./views/MemoriesView.vue";
 import PresentationView from "./views/PresentationView.vue";
+import AccountView from "./views/AccountView.vue";
+import LogsView from "./views/LogsView.vue";
 
 export const router = createRouter({ history: createWebHistory(), routes: [
   { path: "/login", component: LoginView },
@@ -11,6 +13,8 @@ export const router = createRouter({ history: createWebHistory(), routes: [
   { path: "/chat/:id", component: ChatView },
   { path: "/todos", component: TodosView },
   { path: "/memories", component: MemoriesView },
+  { path: "/account", component: AccountView },
+  { path: "/logs", component: LogsView },
   { path: "/presentations/:id", component: PresentationView },
 ] });
 

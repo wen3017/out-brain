@@ -6,6 +6,8 @@
 
 | 方法 | 路径 | 请求体 | 说明 |
 |---|---|---|---|
+| GET | `/auth/options` | - | 公开注册是否开放 |
+| POST | `/auth/password` | `{currentPassword,newPassword}` | 修改密码，吊销全部旧 Access/Refresh 登录；新密码 8–128 位 |
 | POST | `/auth/register` | `{username,password}` | 注册并签发 Access/Refresh Cookie |
 | POST | `/auth/login` | `{username,password}` | 登录 |
 | POST | `/auth/refresh` | - | Refresh Token 轮换 |
@@ -62,6 +64,7 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 
 - `GET /health/live`
 - `GET /health/ready`：检查 PostgreSQL 和 Redis，并返回 Worker 心跳与 online/offline 状态
+- `GET /health/system`：检查数据库、Redis 和最近 30 秒内的 Worker 心跳，缺少任意项时失败
 - `GET /health/capabilities`：返回 Search/SMTP/Embedding/Vision 是否可用，不泄露配置值
 
 ## 错误格式
@@ -73,7 +76,7 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 未知内部错误只返回通用文案及 `traceId`；Provider 原始错误、密钥、Token、完整提示词和文件正文不会返回浏览器。
 
 
-## 整改后新增接口和字段（2026-10-02）
+## 补充接口和字段
 
 以下路径均以 `/api` 为前缀，需要登录且校验资源所属用户。
 
@@ -88,3 +91,17 @@ SSE 的稳定内部事件为：`run.started`、`message.delta`、`message.comple
 会话文件可能为 `PARTIAL`，逐页返回 extractionMethod、qualityStatus、qualityMessage。记忆事实增加 kind（STATE/EVENT）、evidence、withdrawnAt，事件时间与观察时间分开。待办增加 editedFields 和 modelSuggestion；通知增加 CANCELLED 状态。
 
 自动生成 PPT 的版本 previewMeta 包含材料文件 ID、sha256、状态和 parsedSha256；人工编辑版本不重新执行模型事实核对。聊天 SSE 必须收到 run.completed、run.failed 或 run.aborted；HTTP 200 后未收到终止事件即 EOF，前端按异常断流处理并查询后台状态。
+
+## 自动联网与邮件重试协议
+
+`POST /api/conversations/:id/messages` 的 `webSearch` 默认 `"auto"`，也接受 `"on"`、`"off"`；兼容旧客户端 `true`（开启）和 `false`（关闭）。自动模式识别时效性或明确联网请求，显式禁止联网优先。需检索但服务未配置/请求失败时返回 SSE `run.failed` 和明确提示，不以模型旧知识替代。空检索结果与服务失败不同，回答须说明未找到证据。
+
+`POST /api/conversations/:conversationId/meetings/emails/:emailId/retry` 接受可选 JSON `{ "inboxChecked": true }`。不确定/部分投递未确认时返回 `{ "queued": false, "requiresInboxCheck": true, "reason": "..." }`；确认字段应在用户核对收件箱后提交。已发送或发送中的相同版本不会重复排队。
+
+`GET /api/health/capabilities` 增加 `searchMode`、`mailMode`，取值 `disabled`、`mock`、`live`；live 表示已配置真实服务，不代表实时连通状态。Mock 邮件记录用 `errorCode: "MOCK_DELIVERY"` 区分，不等同于真实投递。
+
+## 资源与请求限制
+
+上传每批最多 20 文件、合计 50 MB，单个 PDF 20 MB、TXT 5 MB；整批校验并在同一事务内保存，重复内容不重复占用存储。账号原始上传额度默认 1024 MB。
+
+登录、注册与改密按来源 IP 限流，登录/注册同时按用户名限流。AI 入口（消息、上传、重试与重分析）每账号每分钟最多 20 次、每天默认 200 次；按 UTC 日期重置，失败请求也计入。它是请求配额，不是模型 Token 计费。超限返回 429 和 `Retry-After`，限流服务故障返回 503；修改已有内容、停止生成和查看结果仍可用。浏览器跨来源写请求返回 403。

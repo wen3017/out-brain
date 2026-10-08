@@ -24,7 +24,7 @@ test("register, create both conversation modes, navigate and logout", async ({ p
   await page.getByLabel("用户名").fill(username);
   await page.getByLabel("密码").fill("Playwright123!");
   await page.getByRole("button", { name: "注册并登录" }).click();
-  await expect(page.getByRole("heading", { name: "今天想一起推进什么？" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "会话", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: /普通对话/ }).click();
   await expect(page).toHaveURL(/\/chat\//);
@@ -56,7 +56,7 @@ test("critical artifact UIs support todo updates, memory edits and PPT versionin
     await page.getByLabel("用户名").fill(account);
     await page.getByLabel("密码").fill("Playwright123!");
     await page.getByRole("button", { name: "注册并登录" }).click();
-    await expect(page.getByRole("heading", { name: "今天想一起推进什么？" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "会话", exact: true })).toBeVisible();
     const user = await page.evaluate(() => JSON.parse(localStorage.getItem("nbboss-user") ?? "null"));
     userId = user.id;
     await page.getByRole("button", { name: /会议分析/ }).click();
@@ -73,10 +73,12 @@ test("critical artifact UIs support todo updates, memory edits and PPT versionin
 
     await page.getByRole("button", { name: "记忆管理" }).click();
     await expect(page.getByText("项目地点")).toBeVisible();
-    await expect(page.getByText("上海")).toBeVisible();
+    await page.getByLabel("包含历史记录").check();
+    await expect(page.getByText("上海", {exact:true})).toBeVisible();
     await expect(page.getByText("杭州")).toBeVisible();
-    page.once("dialog", (dialog) => dialog.accept("苏州"));
     await page.getByTitle("编辑记忆").click();
+    await page.getByLabel("记忆内容").fill("苏州");
+    await page.getByRole("button", {name:"保存修改"}).click();
     await expect(page.getByText("苏州")).toBeVisible();
 
     await page.goto(`/presentations/${seeded.presentationId}`);
@@ -101,12 +103,16 @@ test("chat UI uploads a PDF and renders normalized tool lifecycle events", async
     await page.getByLabel("用户名").fill(account);
     await page.getByLabel("密码").fill("Playwright123!");
     await page.getByRole("button", { name: "注册并登录" }).click();
-    await expect(page.getByRole("heading", { name: "今天想一起推进什么？" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "会话", exact: true })).toBeVisible();
     const user = await page.evaluate(() => JSON.parse(localStorage.getItem("nbboss-user") ?? "null"));
     userId = user.id;
     await page.getByRole("button", { name: /普通对话/ }).click();
     await page.locator('input[type="file"]').setInputFiles({ name: "knowledge.pdf", mimeType: "application/pdf", buffer: textPdf("Project owner Alice deadline October 15 2026") });
     await expect(page.getByText("knowledge.pdf · READY")).toBeVisible({ timeout: 15_000 });
+    await expect.poll(async () => {
+      const logs = await (await page.request.get('/api/logs?category=TASK&q=file.parse')).json();
+      return logs.items.some((entry: {status:string;service:string}) => entry.status === 'COMPLETED' && entry.service === 'worker');
+    }).toBe(true);
 
     await page.route("**/api/conversations/*/messages", async (route) => {
       const frames = [
@@ -138,7 +144,7 @@ test("1100px breakpoint keeps artifacts and PPT editing controls reachable", asy
     await page.getByLabel("用户名").fill(account);
     await page.getByLabel("密码").fill("Playwright123!");
     await page.getByRole("button", { name: "注册并登录" }).click();
-    await expect(page.getByRole("heading", { name: "今天想一起推进什么？" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "会话", exact: true })).toBeVisible();
     const user = await page.evaluate(() => JSON.parse(localStorage.getItem("nbboss-user") ?? "null"));
     userId = user.id;
     await page.getByRole("button", { name: /普通对话/ }).click();

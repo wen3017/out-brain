@@ -1,6 +1,7 @@
 import { Injectable, ServiceUnavailableException } from "@nestjs/common";
+import { z } from "zod";
 
-export interface SearchResult { title: string; url: string; snippet: string; retrievedAt: string; publishedAt?: string }
+export interface SearchResult { title: string; url: string; snippet: string; retrievedAt: string; publishedAt?: string; mock?: boolean }
 
 @Injectable()
 export class SearchService {
@@ -9,7 +10,7 @@ export class SearchService {
   async search(query: string): Promise<SearchResult[]> {
     if (!this.available()) throw new ServiceUnavailableException("联网搜索尚未配置");
     const provider = process.env.SEARCH_PROVIDER ?? "tavily";
-    if (provider === "mock") return [{ title: `Mock 搜索结果：${query}`, url: `https://example.test/search?q=${encodeURIComponent(query)}`, snippet: "用于本地验收的确定性搜索结果。", retrievedAt: new Date().toISOString() }];
+    if (provider === "mock") return [{ mock: true, title: `Mock 搜索结果：${query}`, url: `https://example.test/search?q=${encodeURIComponent(query)}`, snippet: "用于本地验收的确定性搜索结果。", retrievedAt: new Date().toISOString() }];
     if (provider !== "tavily") throw new ServiceUnavailableException(`暂不支持搜索服务：${provider}`);
     const response = await fetch("https://api.tavily.com/search", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -17,7 +18,9 @@ export class SearchService {
       signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) throw new ServiceUnavailableException("联网搜索暂时不可用");
-    const data = await response.json() as { results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }> };
+    const parsed = z.object({ results: z.array(z.object({ title: z.string().optional(), url: z.string(), content: z.string().optional(), published_date: z.string().nullable().optional() })) }).safeParse(await response.json());
+    if (!parsed.success) throw new ServiceUnavailableException("搜索服务返回了无效结果，请重试");
+    const data = parsed.data;
     const retrievedAt = new Date().toISOString();
     return (data.results ?? []).filter((r) => this.isSafeUrl(r.url)).map((r) => ({ title: r.title ?? r.url!, url: r.url!, snippet: r.content ?? "", retrievedAt, ...(r.published_date && !Number.isNaN(new Date(r.published_date).valueOf()) ? { publishedAt: new Date(r.published_date).toISOString() } : {}) }));
   }

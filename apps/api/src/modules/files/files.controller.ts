@@ -4,26 +4,23 @@ import type { Response } from "express";
 import { CurrentUser, type AuthUser } from "../../common/current-user.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { FilesService } from "./files.service.js";
+import { UPLOAD_LIMITS } from "@nbboss/contracts";
+import { boundedUploadStorage } from "./upload-storage.js";
+import { AiQuotaGuard } from "../../common/request-limits.js";
 
-@Controller() @UseGuards(JwtAuthGuard)
+@Controller() @UseGuards(JwtAuthGuard, AiQuotaGuard)
 export class FilesController {
   constructor(private readonly files: FilesService) {}
 
-  @Post("conversations/:conversationId/files") @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 20 * 1024 * 1024 } }))
+  @Post("conversations/:conversationId/files") @UseInterceptors(FileInterceptor("file", { storage: boundedUploadStorage, limits: { fileSize: UPLOAD_LIMITS.pdfBytes, fields: 0 } }))
   async upload(@CurrentUser() user: AuthUser, @Param("conversationId") conversationId: string, @UploadedFile() file: Express.Multer.File) {
     const asset = await this.files.save(user.id, conversationId, file);
     return { id: asset.id, conversationId: asset.conversationId, kind: asset.kind, originalName: asset.originalName, mimeType: asset.mimeType, size: asset.size, status: asset.status, errorMessage: asset.errorMessage, createdAt: asset.createdAt };
   }
 
-  @Post("conversations/:conversationId/files/batch") @UseInterceptors(FilesInterceptor("files", 20, { limits: { fileSize: 20 * 1024 * 1024 } }))
+  @Post("conversations/:conversationId/files/batch") @UseInterceptors(FilesInterceptor("files", UPLOAD_LIMITS.files, { storage: boundedUploadStorage, limits: { fileSize: UPLOAD_LIMITS.pdfBytes, files: UPLOAD_LIMITS.files, fields: 0 } }))
   async uploadBatch(@CurrentUser() user: AuthUser, @Param("conversationId") conversationId: string, @UploadedFiles() files: Express.Multer.File[]) {
-    await this.files.validateBatch(user.id,conversationId,files);
-    const assets = [];
-    try { for(const file of files ?? []) assets.push(await this.files.save(user.id, conversationId, file, true)); }
-    finally {
-      const results = await Promise.allSettled(assets.filter(asset=>asset.status==="PROCESSING").map(asset=>this.files.enqueue(asset.id)));
-      if(results.some(result=>result.status==="rejected")) throw new Error("部分文件入队失败，请在文件面板重试");
-    }
+    const assets = await this.files.saveBatch(user.id, conversationId, files);
     return assets.map(asset=>({id:asset.id,conversationId:asset.conversationId,originalName:asset.originalName,status:asset.status}));
   }
 

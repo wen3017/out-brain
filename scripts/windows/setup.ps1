@@ -10,7 +10,7 @@ $setupLock = Enter-LauncherLock
 try {
 foreach ($service in @('postgres', 'redis', 'api', 'worker', 'web')) {
     if (Get-ManagedRecord $service) {
-        throw 'Project services are running. Run stop.cmd before reconfiguring the environment.'
+        throw 'Project services are running. Run start.cmd stop before reconfiguring the environment.'
     }
 }
 
@@ -38,7 +38,7 @@ function Get-Archive([string]$Url, [string]$Name, [string]$Sha256, [switch]$GitH
         $curlArgs += @('-H', 'Accept: application/octet-stream', '-H', 'X-GitHub-Api-Version: 2022-11-28', '-H', 'User-Agent: NBBOSS-local-setup')
     }
     & curl.exe @curlArgs --output $partial $Url
-    if ($LASTEXITCODE -ne 0) { throw "Download failed: $Name. Run setup.cmd again to retry." }
+    if ($LASTEXITCODE -ne 0) { throw "Download failed: $Name. Run start.cmd setup again to retry." }
     if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Sha256) {
         throw "SHA256 verification failed: $Name"
     }
@@ -68,7 +68,7 @@ if (!(Test-Path (Join-Path $pgRoot 'lib/vector.dll'))) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (!(Test-Path $vswhere)) { throw 'Visual Studio C++ build tools are needed to compile pgvector.' }
     $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (!$vsRoot) { throw 'Install the Visual Studio Desktop development with C++ workload, then rerun setup.cmd.' }
+    if (!$vsRoot) { throw 'Install the Visual Studio Desktop development with C++ workload, then rerun start.cmd setup.' }
     $archive = Get-Archive 'https://codeload.github.com/pgvector/pgvector/zip/refs/tags/v0.8.6' `
         'pgvector-v0.8.6.zip' 'e93a1567219c9ce523ca16473f6c41cc80e01345b2d91ccdee40b473b7c5dd0a'
     Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $localRoot 'src') -Force
@@ -172,7 +172,7 @@ if (!(Test-Path (Join-Path $pgData 'PG_VERSION'))) {
 }
 if (!(Test-Path -LiteralPath $setupMarker)) {
     if (Get-NetTCPConnection -State Listen -LocalPort $pgPort -ErrorAction SilentlyContinue) {
-        throw "Port $pgPort is in use. Stop the conflicting database before running setup.cmd again."
+        throw "Port $pgPort is in use. Stop the conflicting database before running start.cmd setup again."
     }
     $started = $false
     $oldPassword = $env:PGPASSWORD

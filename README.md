@@ -1,685 +1,241 @@
 # NBBOSS AI 外脑
 
-## 2026-09-30 功能完善
+面向内部协作的多用户 AI 工作台，提供流式会话、PDF 知识问答、会议分析、待办管理、长期记忆、PPT 生成与编辑，以及账号操作日志。
 
-- 图片型 PDF 自动使用本地中文/英文 OCR，保留页码与提取方式；小字、装饰字体可能有误差，页面提示核对原页。第一次使用需联网下载语言包，Windows 启动器统一缓存到 `data/ocr-cache`，之后可离线识别。
-- 会议重分析保留会议与待办记录，按来源证据匹配风险；人工修改和完成状态保留。未再检出的风险标为待复核，分组变化产生的历史会议保留展示，不再静默删除。
-- 邮件通过数据库持久化任务由 Worker 独立投递，失败可在会议面板重试；显示“已提交 SMTP”而不是保证收件。进程中断导致结果不确定时，应先检查收件箱再重试。
-- 对话可读取本次会议并检索跨会话记忆；PPT 优先使用最新消息及相关资料。聊天创建的后台任务会自动刷新状态，文件解析和 PPT 失败均可重试。
+本文以当前仓库实现为准。项目采用 pnpm workspace 管理前端、后端与共享协议；后端按业务组织代码，以 API 和 Worker 两种进程运行，共用数据库、任务队列和文件存储。
 
-### 网易 163 邮箱配置（项目外保存）
+## 1. 整体架构
 
-1. 登录 [163 邮箱](https://mail.163.com/)，在设置中的 POP3/SMTP/IMAP 服务处启用 SMTP 并生成授权码。使用授权码，不使用网页登录密码。操作说明可参考 [华为官方的 163 授权码指引](https://consumer.huawei.com/cn/support/content/zh-cn15872099/)。
-2. 在项目根目录执行：
+```mermaid
+flowchart TB
+    Browser[浏览器]
+    Web[Vue 3 Web / Vite 或 Nginx]
+    API[NestJS API / HTTP 与 SSE]
+    Agent[Pi Agent Runtime / 领域工具]
+    Queue[Redis / BullMQ 队列与分布式锁]
+    Worker[NestJS Worker / 后台任务]
+    DB[(PostgreSQL / pgvector)]
+    Storage[(共享文件目录 / STORAGE_ROOT)]
+    Model[模型服务 / LLM、Embedding、Vision]
+    Search[Tavily 搜索]
+    SMTP[SMTP 邮件服务]
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/configure-services.ps1 -Service smtp
-   ```
+    Browser --> Web
+    Web -->|/api 请求| API
+    API -->|流式对话| Agent
+    API -->|提交任务| Queue
+    Queue -->|消费任务| Worker
+    API --> DB
+    Worker --> DB
+    API --> Storage
+    Worker --> Storage
+    Agent -->|读取资料与记忆| DB
+    Agent -->|调用模型| Model
+    Agent -->|启用联网时| Search
+    Agent -->|耗时工具入队| Queue
+    Worker -->|分析与生成| Model
+    Worker -->|投递待处理邮件| SMTP
+```
 
-3. 按提示输入发件邮箱、收件邮箱和授权码。测试时可把收件邮箱填写为自己的邮箱。脚本预设 `smtp.163.com:465`，只保存配置，不发送邮件。
-4. 运行 `stop.cmd`，再运行 `start.cmd`。配置生效后，可在会议产物区重试投递；请检查实际收件箱和垃圾邮件目录。
+- **Web** 负责页面交互、表单编辑、流式展示和后台产物状态刷新。开发环境使用 Vite，Docker 环境由 Nginx 提供静态资源并代理 `/api`。
+- **API** 负责身份校验、资源归属检查、业务读写、对话执行与任务提交。聊天流在 API 进程中执行，后台耗时任务交给 Worker。
+- **Worker** 与 API 复用同一套服务代码，设置 `WORKER_MODE=true` 后创建 NestJS 应用上下文，不启动 HTTP 监听。它消费 BullMQ 任务，并定时处理邮件和检查中断任务。
+- **PostgreSQL** 保存业务状态、会话上下文和执行记录；**Redis** 保存队列、短期锁及 Worker 心跳；**文件目录**保存上传原件与导出的 PPTX。
 
-授权码以 Windows DPAPI 加密保存在 `%LOCALAPPDATA%\NBBOSS\services.json`，只由当前 Windows 用户解密，并只注入 API/Worker。现有百炼配置继续保存在独立的 `provider.json`，不会被覆盖。
+代码启动入口为 [main.ts](apps/api/src/main.ts)，服务注册集中在 [app.module.ts](apps/api/src/app.module.ts)。业务目录中的控制器与服务由这个应用模块统一装配。
 
-### 联网搜索与测试
+## 2. 技术组成
 
-没有 Tavily 密钥时页面保持“联网未配置”，不会以 Mock 冒充真实搜索。取得密钥后运行同一配置脚本并使用 `-Service search`，再重启。
+| 层次 | 当前实现 | 用途 |
+| --- | --- | --- |
+| 前端 | Vue 3、TypeScript、Vite、Vue Router、Pinia | 页面、路由、登录与交互状态 |
+| HTTP 服务 | NestJS、Express、JWT、Argon2 | 接口、认证、密码哈希 |
+| Agent | Pi Agent Core、Pi AI、TypeBox | 模型适配、工具调用、执行事件 |
+| 数据与校验 | PostgreSQL 16、pgvector、Prisma、Zod | 数据持久化、迁移、输入与结构化结果校验 |
+| 后台执行 | Redis、BullMQ | 异步任务、重试、去重与锁 |
+| 文件处理 | pdfjs-dist、Tesseract.js、PptxGenJS | PDF 提取、本地 OCR、PPTX 导出 |
+| 外部服务 | OpenAI-compatible 模型、Tavily、SMTP | 模型推理、可选搜索和邮件 |
+| 验证与部署 | Vitest、Supertest、Playwright、Docker Compose | 单元、接口、页面测试与运行环境 |
 
-验证命令：`pnpm typecheck`、`pnpm test`、`pnpm test:integration`、`pnpm test:e2e`。集成与页面测试需先启动本地服务；Mock 搜索测试不代表真实搜索验收。数据库新增迁移由 `start.cmd` 自动应用。
+依赖版本以各包的 `package.json` 和根目录 `pnpm-lock.yaml` 为准。
 
-NBBOSS AI 外脑是一个面向内部员工的多用户 AI 工作台。项目基于 Node.js/TypeScript，使用 Pi Agent Runtime 统一承载多轮模型执行、工具调用和流式事件，并提供会话级 PDF RAG、会议风险闭环、长期记忆、联网搜索和可编辑 PPTX。
-
-- 产品与架构基线：[`doc/adr/0001-nbboss-ai-brain-architecture.md`](doc/adr/0001-nbboss-ai-brain-architecture.md)
-- 用户操作手册：[`doc/user-manual.md`](doc/user-manual.md)
-- 验收证据：[`doc/adr/0001-acceptance-evidence.md`](doc/adr/0001-acceptance-evidence.md)
-- HTTP/SSE API：[`doc/api.md`](doc/api.md)
-- 数据模型：[`doc/data-model.md`](doc/data-model.md)
-- 第三方许可证：[`doc/third-party-licenses.md`](doc/third-party-licenses.md)
-
-## 1. 技术栈
-
-| 层次 | 技术 |
-|---|---|
-| Web | Vue 3、TypeScript、Vite、Vue Router、Pinia、TanStack Query |
-| API | Node.js 24、NestJS、REST、SSE |
-| Agent | `@earendil-works/pi-agent-core@0.87.1` |
-| Model | `@earendil-works/pi-ai@0.87.1`、OpenAI-compatible Provider |
-| 数据库 | PostgreSQL 16、pgvector、Prisma |
-| 缓存与任务 | Redis、BullMQ |
-| 文档 | pdfjs-dist、PptxGenJS |
-| 校验 | TypeBox、Zod |
-| 测试 | Vitest、Supertest、Playwright |
-| 部署 | Docker Compose、Nginx |
-
-## 2. 仓库结构
+## 3. 目录与代码职责
 
 ```text
-.
-├── apps/
-│   ├── api/                    # NestJS API、Worker、Prisma、Pi Agent Runtime
-│   └── web/                    # Vue 3 桌面 Web
-├── packages/
-│   └── contracts/              # 前后端共享 Schema 与事件类型
-├── demo/
-│   └── meeting-files/          # 可直接上传的会议测试材料
-├── docker/
-│   └── postgres/init.sql       # pgvector 初始化
-├── doc/
-│   ├── adr/                    # 架构决策与验收证据
-│   ├── api.md                  # API/SSE 文档
-│   ├── data-model.md           # 数据模型说明
-│   ├── user-manual.md          # 最终用户手册
-│   └── third-party-licenses.md
-├── e2e/                        # Playwright 端到端测试
-├── docker-compose.yml
-├── pnpm-workspace.yaml
-└── .env.example
+apps/
+  api/
+    src/
+      main.ts                 API / Worker 启动分支
+      app.module.ts           依赖注入与服务注册
+      common/                 当前用户、异常处理、请求与活动日志
+      infra/                  Prisma、Redis、任务提交与消费
+      modules/                按业务组织的控制器与服务
+    prisma/                   数据模型和增量迁移
+    test/                     后端单元与集成测试
+  web/
+    src/
+      views/                  会话、登录、待办、记忆、PPT、日志页面
+      components/             共享界面组件
+      stores/                 前端状态
+      api.ts                  HTTP、认证续期与 SSE 读取
+      router.ts               页面路由
+      styles.css              界面样式
+packages/contracts/           前后端共享 Schema、类型与事件协议
+e2e/                          页面测试、Playwright 配置及示例材料
+scripts/windows/              本机安装、启动、停止与服务配置
+doc/                          部署、接口、用户操作等详细说明
+docker/                       容器初始化配置
 ```
 
-## 3. 架构概览
+前端的路由登录判断用于页面导航，实际接口权限由后端认证和资源归属检查决定。`api.ts` 携带 Cookie 请求接口，在访问凭证过期时尝试刷新；SSE 通过 `fetch` 响应流读取。前端使用共享协议包约束部分业务类型，后端对输入和模型结构化输出进行校验。
 
-```text
-Browser / Vue 3
-      |
-      | REST + SSE / HttpOnly Cookie
-      v
-NestJS API
-      |-- Auth / tenant boundary
-      |-- AgentRuntimePort --> Pi Agent Core --> Pi AI Provider --> GLM
-      |-- Conversation / File / Meeting / Todo / Memory / PPT services
-      |-- PostgreSQL + pgvector
-      |-- Redis distributed locks
-      `-- BullMQ queue
-             |
-             v
-        NestJS Worker
-        |-- PDF/TXT parsing
-        |-- Meeting analysis
-        |-- Memory extraction
-        `-- PPT generation/export
+## 4. 后端业务模块
+
+模块代码位于 [apps/api/src/modules](apps/api/src/modules)。
+
+| 模块 | 主要职责 | 主要协作对象 |
+| --- | --- | --- |
+| `auth` | 注册、登录、刷新、退出和修改密码；签发 HttpOnly Cookie | User、RefreshToken |
+| `conversations` | 会话、消息、执行状态与流式接口 | AgentRuntimePort、任务服务 |
+| `agent` | 恢复模型上下文、模型适配、工具执行与事件转换 | 检索、记忆、会议、PPT、搜索 |
+| `files` | 上传、解析、OCR、分块和会话内检索 | 文件目录、Worker、Embedding |
+| `meetings` | 会议分组、证据风险、重分析及待办关联 | 文件、模型、待办、邮件 |
+| `todos` | 待办筛选、编辑和状态变更 | 会议风险与人工修改字段 |
+| `memories` | 记忆抽取、检索、历史版本与人工修正 | 会话、会议、抽取任务 |
+| `presentations` | PPT 后台生成、事实校验、编辑版本与下载 | 模型、任务队列、文件目录 |
+| `search` | 可选联网检索与来源信息 | Tavily、SearchRun |
+| `mail` | 持久化投递记录、重试与当前内容核对 | EmailDelivery、SMTP |
+| `logs` | 按账号查询日志、游标分页与过期清理 | ActivityLog、统一日志写入器 |
+
+Agent 通过 `AgentRuntimePort` 接入会话层，将 Pi 的执行事件转换为项目内部协议。工具包括资料检索、记忆检索、当前会议读取、联网搜索、会议分析和 PPT 生成；工具层处理资源范围、功能开关及执行额度，领域服务负责最终校验和写入。
+
+## 5. 关键业务数据流
+
+### 5.1 流式对话
+
+```mermaid
+sequenceDiagram
+    participant UI as Web
+    participant API as API / Conversations
+    participant DB as PostgreSQL
+    participant Agent as Agent Runtime
+    participant LLM as 模型服务
+    UI->>API: POST 消息 / Cookie
+    API->>DB: 校验会话归属并保存消息与执行记录
+    API->>Agent: 当前输入与历史上下文
+    Agent->>LLM: 模型请求
+    LLM-->>Agent: 文本增量或工具调用
+    Note over Agent: 按需调用领域工具，并继续模型执行
+    Agent-->>API: 标准化文本、工具与运行事件
+    API-->>UI: SSE 持续返回
+    API->>DB: 保存结果、上下文和运行状态
 ```
 
-关键原则：
+用户可见消息与模型使用的工具上下文保存在数据库中，恢复会话时从数据库读取。页面识别完成、失败和中止等终止事件；连接意外结束时提示核对后台状态，避免直接重复发送。
 
-- PostgreSQL 是业务数据和 Agent transcript 的唯一权威来源；
-- Pi Agent 是唯一 Agent Loop，业务层只依赖 `AgentRuntimePort`；
-- API 和 Worker 使用同一镜像与代码版本；
-- 所有业务查询都受当前用户范围约束；数据库触发器进一步阻止跨租户关联；
-- 文件只能经鉴权 API 下载，不暴露静态上传目录；
-- Search、SMTP、Embedding 和模型接入均通过可替换 Adapter。
+### 5.2 文件与知识问答
 
-## 4. 前置条件
+上传文件后，API 保存原件及 `FileAsset`，提交 `file.parse`。Worker 提取 PDF 文本，对需要的页面执行 OCR，保存页码、页面内容和分块；TXT 可作为会议分析材料。
 
-推荐直接使用 Docker Compose：
+问答检索限定当前账号与当前会话的可用 PDF。默认使用 BM25；配置 Embedding 后增加 pgvector 语义检索，以 RRF 合并排名。Embedding 不可用或调用失败时回退到文本检索。结果携带文件名、页码和证据文本，供回答引用。OCR 和模型输出仍需结合原文核对。
 
-- Docker Desktop，或 macOS 上的 Colima；
-- Docker Compose v2，或独立的 `docker-compose`；
-- 至少为容器预留约 4 GB 内存。
+### 5.3 会议、待办与邮件
 
-本地开发还需要：
+会议模式的文件解析完成后，任务服务通过防抖合并同批上传，提交 `meeting.analyze`。Worker 读取材料，识别会议、风险和原文证据，保存 `Meeting`、`Risk`、`Todo` 等记录。重分析会处理旧风险与来源变化，并保留人工修改及完成状态。
 
-- Node.js `>=22.19.0`，推荐 Node.js 24；
-- pnpm `11.22.0`；
-- PostgreSQL 16 + pgvector；
-- Redis 7。
+邮件使用数据库中的 `EmailDelivery` 记录，由 Worker 定时投递，独立于四类 BullMQ 业务任务。投递前核对当前有效内容；未配置 SMTP 不阻止会议与待办生成。SMTP 接受请求并不等同于最终收件，结果不确定时需要先核对邮箱。
 
-启用仓库声明的 pnpm 版本：
+### 5.4 长期记忆
 
-```bash
-corepack enable
-corepack prepare pnpm@11.22.0 --activate
-```
+会话或会议内容触发抽取时，先持久化 `MemoryExtraction`，再提交 `memory.extract`。Worker 提取实体与事实，保存来源、观察时间、历史版本和人工修正标记。后续对话可检索同一账号的跨会话记忆；删除来源或重分析时同步处理相关自动记忆。
 
-## 5. 配置
+### 5.5 PPT 生成与编辑
 
-复制配置模板：
+生成请求创建 `Presentation` 并提交 `presentation.generate`。Worker 基于输入及相关材料生成结构化幻灯片、核对事实并导出 PPTX，前端刷新任务状态。用户在编辑页调整内容，保存为新的 `PresentationVersion`；版本保存使用锁协调，下载对应版本的导出文件。
 
-```bash
-cp .env.example .env
-chmod 600 .env
-```
+## 6. 数据与存储边界
 
-### 5.1 必需配置
+数据库定义见 [schema.prisma](apps/api/prisma/schema.prisma)，结构变更通过 [迁移目录](apps/api/prisma/migrations)维护。
 
-| 变量 | 说明 | 示例/默认值 |
-|---|---|---|
-| `DATABASE_URL` | Prisma PostgreSQL 连接 | Compose 内使用主机名 `postgres` |
-| `REDIS_URL` | BullMQ 与分布式锁 | Compose 内使用 `redis://redis:6379` |
-| `JWT_ACCESS_SECRET` | Access Token 签名密钥 | 至少 32 个随机字符 |
-| `JWT_REFRESH_SECRET` | Refresh Token 签名密钥 | 至少 32 个随机字符，不能与 Access 相同 |
-| `STORAGE_ROOT` | 上传文件与 PPTX 的持久化目录 | Compose 中为 `/app/data/uploads` |
-| `LLM_BASE_URL` | OpenAI-compatible API 根地址 | `https://open.bigmodel.cn/api/coding/paas/v4` |
-| `LLM_API_KEY` | 模型密钥 | 仅写入本机 `.env` |
-| `LLM_MODEL` | 模型 ID | `glm-5.3` |
-| `WEB_ORIGIN` | CORS 允许的 Web 地址 | `http://localhost:3000` |
+| 数据域 | 核心模型 | 保存内容 |
+| --- | --- | --- |
+| 身份 | User、RefreshToken | 账号、密码哈希和刷新凭证记录 |
+| 会话执行 | Conversation、Message、AgentRun、AgentEvent、ToolExecution | 消息、模型上下文、事件、工具与用量 |
+| 文件知识 | FileAsset、DocumentPage、DocumentChunk | 原件元数据、页面、分块及可选向量 |
+| 会议行动 | Meeting、MeetingDocument、Risk、Todo、EmailDelivery | 会议来源、证据、待办和邮件状态 |
+| 长期记忆 | MemoryExtraction、MemoryEntity、MemoryFact | 抽取任务、实体、事实与版本关系 |
+| 搜索 | SearchRun | 查询、检索时间与来源 |
+| PPT | Presentation、PresentationVersion | 生成状态、幻灯片 JSON 和版本产物 |
+| 日志 | ActivityLog | 账号、操作、级别、参考编号及受限元数据 |
 
-不要把真实密钥写入 README、`.env.example`、源码、测试快照或日志。`.env` 已被 `.gitignore` 排除。
+用户资源通过 `userId` 或父级会话关系隔离。数据库约束还校验部分冗余用户字段与跨会话关联，不能仅依赖前端传入的资源 ID。文件二进制不存入 PostgreSQL，API 与 Worker 必须访问同一个 `STORAGE_ROOT`。
 
-### 5.2 Agent 与超时
+## 7. 任务可靠性与日志
 
-| 变量 | 默认值 | 说明 |
-|---|---:|---|
-| `LLM_TIMEOUT_MS` | `180000` | 单次 Provider 调用硬超时 |
-| `LLM_MAX_RETRIES` | `2` | Provider 临时错误重试数 |
-| `LLM_MAX_RETRY_DELAY_MS` | `30000` | 最大重试等待时间 |
-| `PI_AGENT_THINKING_LEVEL` | `medium` | Pi Agent 思考等级 |
-| `PI_AGENT_MAX_TOOL_TURNS` | `8` | 单次 Run 最大工具轮次 |
-| `PI_AGENT_TOOL_EXECUTION` | `parallel` | 默认工具执行方式；副作用工具单独强制串行 |
-| `PI_AGENT_VERSION` | `0.87.1` | 运行时基线标识 |
-| `MEETING_UPLOAD_DEBOUNCE_MS` | `2000` | 同批 TXT 自动分析防抖窗口 |
+BullMQ 队列名为 `nbboss`，消费 `file.parse`、`meeting.analyze`、`memory.extract`、`presentation.generate`。任务按类型设置重试策略；无效输入等确定性错误停止重试，临时服务错误有限重试。任务 ID、防抖、领域缓存键和锁共同减少重复处理。
 
-### 5.3 可选 Embedding
+Worker 写入 Redis 心跳，定期检查长期未完成且已无有效队列任务的记录，将其标为可重试的失败状态。业务状态以数据库为准，队列存在不代表业务成功；进程中断和外部服务失败仍需通过任务状态及日志定位。
 
-```dotenv
-EMBEDDING_BASE_URL=
-EMBEDDING_API_KEY=
-EMBEDDING_MODEL=
-```
+- `/api/health/live`：API 存活。
+- `/api/health/ready`：检查 PostgreSQL 和 Redis，并返回 Worker 心跳状态；Worker 离线不直接使此接口返回失败。
+- `/api/health/system`：同时检查数据库、Redis 和 Worker 心跳，后台任务不可用时返回 503。
+- `/api/health/capabilities`：报告搜索、邮件、OCR、Embedding、Vision 等配置能力，不代表外部服务实时连通状态。
+- 日志中心按当前账号查询 ActivityLog，默认保留 30 天，由 `LOG_RETENTION_DAYS` 控制；导出范围为当前页。
+- 原始服务日志保存在 `.local/logs/`，与页面日志分开管理。日志写入限制元数据，不记录密码、令牌及用户正文。
 
-三项完整配置后使用向量 + BM25 + RRF；否则自动降级为 BM25，不影响 PDF 问答。
+## 8. 运行与部署
 
-### 5.4 可选联网搜索
+| 方式 | Web | API / Worker | 数据与文件 |
+| --- | --- | --- | --- |
+| Windows 本机 | Vite，默认 3000 | 独立 Node 进程；API 默认 3001 | 本地 PostgreSQL、Redis 与上传目录 |
+| Docker Compose | Nginx，宿主机默认 3000 | 同一 API 镜像分别运行两个服务 | PostgreSQL 命名卷；API/Worker 共享上传卷 |
 
-默认关闭：
+Compose 已为 Redis 启用 AOF 和持久化卷，各服务配置自动重启，默认端口仅绑定本机。项目提供数据库与文件的备份恢复脚本、启动配置校验、注册开关和请求/上传限额；部署到公网时仍需配置 TLS、独立数据库凭据和实际容量预算，见[部署说明](doc/deployment.md)。
 
-```dotenv
-SEARCH_ENABLED=false
-SEARCH_PROVIDER=tavily
-SEARCH_API_KEY=
-```
-
-无真实 Key 时可使用确定性 Mock：
-
-```dotenv
-SEARCH_ENABLED=true
-SEARCH_PROVIDER=mock
-```
-
-### 5.5 可选邮件
-
-默认关闭：
-
-```dotenv
-SMTP_ENABLED=false
-SMTP_PROVIDER=smtp
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASSWORD=
-SMTP_FROM=
-SMTP_TO=
-```
-
-本地验证可使用：
-
-```dotenv
-SMTP_ENABLED=true
-SMTP_PROVIDER=mock
-SMTP_TO=demo@example.test
-```
-
-Mock 不会发送真实邮件。
-
-### 5.6 可选视觉模型
-
-```dotenv
-VISION_ENABLED=false
-VISION_BASE_URL=
-VISION_API_KEY=
-VISION_MODEL=
-```
-
-视觉能力是扩展接口，默认关闭，不属于当前硬验收链路。
-
-## 6. Docker Compose 启动
-
-### 6.1 最短上手路径
-
-```bash
-make setup
-# 编辑 .env，至少填写 LLM_API_KEY，并替换两个 JWT Secret
-make up
-make ps
-```
-
-然后访问 <http://localhost:3000>。常用命令可通过 `make help` 查看。
-
-### 6.2 标准 Docker 环境
-
-```bash
-docker compose up -d --build
-```
-
-如果环境仍使用独立命令：
-
-```bash
-docker-compose up -d --build
-```
-
-访问：
-
-- Web：<http://localhost:3000>
-- Liveness：<http://localhost:3001/api/health/live>
-- Readiness：<http://localhost:3001/api/health/ready>
-- 能力开关：<http://localhost:3001/api/health/capabilities>
-
-### 6.3 Colima
-
-```bash
-colima start
-DOCKER_HOST=unix://$HOME/.colima/default/docker.sock docker-compose up -d --build
-```
-
-检查状态：
-
-```bash
-DOCKER_HOST=unix://$HOME/.colima/default/docker.sock docker-compose ps
-```
-
-也可以让 Makefile 使用指定的 Compose 命令和 Docker Host：
-
-```bash
-DOCKER_HOST=unix://$HOME/.colima/default/docker.sock \
-  make up
-```
-
-Makefile 会自动选择 `docker compose` 或 `docker-compose`；如需强制指定，仍可传入
-`COMPOSE=docker-compose`。Colima 默认只共享用户目录，因此请将仓库克隆到
-`$HOME` 下（例如 `$HOME/workspace/out-brain`），不要从 `/tmp` 启动挂载了本地文件的服务。
-
-### 6.4 日志
-
-```bash
-docker compose logs -f api worker web
-docker compose logs -f postgres redis
-```
-
-后台任务日志为结构化 JSON，包含 `traceId`、不可逆用户标识、资源、任务类型、状态、耗时、尝试次数和错误码，不记录提示词正文或凭据。
-
-### 6.5 停止与清理
-
-保留数据库及上传文件：
-
-```bash
-docker compose down
-```
-
-同时永久删除数据库、上传文件和 PPTX：
-
-```bash
-docker compose down -v
-```
-
-请勿在需要保留演示数据时使用 `-v`。
-
-## 7. 本地开发
-
-### 7.0 Windows 一键运行（无需 Docker）
-
-在 Windows PowerShell 中，先安装 Node.js 24、pnpm 11.22.0，以及带有
-“使用 C++ 的桌面开发”组件的 Visual Studio 2022（首次编译 pgvector 需要）。
-配置脚本使用 Windows 自带的 `curl.exe` 和 `tar.exe`，无需安装系统服务。
-
-首次配置可双击项目根目录的 `setup.cmd`，也可执行：
+Windows 安装 Node.js 24、pnpm 11.22.0 和 Visual Studio C++ 构建工具后，在根目录运行：
 
 ```powershell
-pnpm setup:local
+.\start.cmd setup       # 首次安装环境
+.\start.cmd configure   # 配置邮件与搜索，可选
+.\start.cmd start       # 启动
+.\start.cmd stop        # 停止并保留数据
 ```
 
-脚本会安装项目依赖，并将 PostgreSQL 16.15、pgvector 0.8.6 和 Redis 7.2.16
-配置到项目的 `.local` 目录。PostgreSQL 使用
-[EDB 官方发行包](https://www.enterprisedb.com/download-postgresql-binaries)，
-pgvector 从[官方源码](https://github.com/pgvector/pgvector)编译，
-Redis 使用 [redis-windows 社区维护的 Windows 便携构建](https://github.com/redis-windows/redis-windows)，
-用于本地开发。下载文件均校验固定 SHA256。
+双击 `start.cmd` 可打开管理菜单。模型服务需另按部署文档配置 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 并开启 `LLM_ENABLED=true`；邮件与搜索配置窗口不负责设置模型。访问 [localhost:3000](http://localhost:3000)，首次使用注册账号。
 
-首次运行会生成根目录 `.env`，使用随机数据库密码和两个不同的 JWT 密钥；
-已有 `.env` 会保留。该方式的 `DATABASE_URL` 和 `REDIS_URL` 必须指向本机，
-不要保留 Compose 模板中的 `postgres`、`redis` 主机名。
+核心配置分组如下，完整模板见 [.env.example](.env.example)：
 
-编辑根目录 `.env`，填写 `LLM_API_KEY`，并确认 `LLM_BASE_URL`、`LLM_MODEL`
-与实际账号一致。未填 Key 时可以验证页面、注册登录和基础服务，模型功能无法使用。
+| 分组 | 主要变量 |
+| --- | --- |
+| 基础服务 | `DATABASE_URL`、`REDIS_URL`、`STORAGE_ROOT`、`API_PORT`、`WEB_ORIGIN` |
+| 身份凭证 | `JWT_ACCESS_SECRET`、`JWT_REFRESH_SECRET` |
+| 模型执行 | `LLM_*`、`PI_AGENT_*` |
+| 可选能力 | `EMBEDDING_*`、`VISION_*`、`SEARCH_*`、`SMTP_*` |
+| 运维 | `LOG_RETENTION_DAYS`、`WORKER_MODE` |
 
-Windows 启动器也支持项目目录外的 `%LOCALAPPDATA%\NBBOSS\provider.json`：
-其中 `baseUrl`、`model` 指定模型服务，`apiKeyDpapi` 保存由当前 Windows 用户通过
-`ConvertFrom-SecureString`（不指定 `-Key`）生成的加密密钥。
-存在此配置时，它会覆盖 API 和 Worker 的模型配置；密钥仅在启动时注入这两个进程，
-不会写入项目 `.env`，也不会注入前端或构建进程。修改此配置后先停止再启动项目。
-DPAPI 加密配置不能直接拷贝给其他 Windows 用户使用。
+`.local/data/` 保存本机数据库与 Redis 数据，`.local/logs/` 保存日志，`.local/downloads/` 保存安装缓存，`.local/test-results/` 保存页面测试输出。本机上传目录默认 `data/uploads/`，具体以 `STORAGE_ROOT` 为准；业务数据和密钥不提交 Git。
 
-以后双击 `start.cmd`，或运行：
-
-```powershell
-pnpm start:local
-```
-
-启动脚本会构建共享模块和 API、应用数据库迁移，并在后台启动 PostgreSQL、Redis、
-API、Worker 和 Vite；就绪后打开 <http://localhost:3000>。首次进入页面需要注册账号。
-关闭启动窗口或浏览器不会停止后台服务。默认端口为 3000、3001、5432、6379；
-若端口已被其他程序占用，脚本会报错，不会停止或接管其他程序。
-
-停止时双击 `stop.cmd`，或运行：
-
-```powershell
-pnpm stop:local
-```
-
-停止会保留数据库、Redis 和上传数据。修改 `.env` 或 API 源码后需要先停止再启动；
-前端源码由 Vite 自动热更新。重复执行启动命令会复用已由本项目启动的服务。
-
-路径说明：
-
-- 配置：`.env`（不要提交或分享真实密钥）
-- 服务日志：`.local/logs/`（API/Worker/Web 各有 `stdout.log`、`stderr.log`）
-- 数据库：`.local/data/postgres/`
-- Redis 数据：`.local/data/redis/`
-- 上传和生成文件：`data/uploads/`
-
-`.local`、`.env` 和数据目录均已排除 Git 提交；`.local` 也已排除 Docker 构建。
-不要删除 `.local/data`，其中包含本地业务数据。
-
-### 7.1 安装依赖
+## 9. 开发与测试
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm db:generate
+pnpm typecheck           # TypeScript 检查
+pnpm test                # 单元与协议测试
+pnpm build               # 共享包、API 和 Web 构建
+pnpm test:integration    # 后端集成测试
+pnpm test:e2e            # 页面回归测试
 ```
 
-### 7.2 启动基础设施
+集成与页面测试需要先启动数据库、Redis、API 和 Worker。
 
-```bash
-docker compose up -d postgres redis
-```
+新增业务时，在对应领域服务中实现权限与一致性逻辑，必要时更新 Prisma 迁移和共享协议，再接入控制器、Agent 工具或任务处理器。外部模型或搜索适配集中在对应服务中，避免把提供商细节分散到页面和控制器。
 
-如果 API/Worker 在宿主机运行，`.env` 中连接地址应使用宿主机端口：
+## 10. 详细资料
 
-```dotenv
-DATABASE_URL=postgresql://nbboss:nbboss@localhost:5432/nbboss?schema=public
-REDIS_URL=redis://localhost:6379
-STORAGE_ROOT=./data/uploads
-```
+- [部署与开发](doc/deployment.md)：完整启动步骤、配置、迁移与故障排查。
+- [用户手册](doc/user-manual.md)：页面操作和业务使用方式。
+- [API](doc/api.md)：HTTP 与 SSE 接口说明。
+- [架构实现约束](doc/architecture.md)：Agent、后台任务和数据一致性约束。
+- [日志说明](doc/logging.md)：记录范围、权限、保留与原始日志。
+- [第三方许可证](doc/third-party-licenses.md)：主要依赖的许可证。
 
-执行迁移：
-
-```bash
-pnpm db:migrate
-```
-
-### 7.3 启动 API、Web 和 Worker
-
-终端一：
-
-```bash
-pnpm --filter @nbboss/api dev
-```
-
-终端二：
-
-```bash
-pnpm --filter @nbboss/web dev
-```
-
-终端三：
-
-```bash
-WORKER_MODE=true pnpm --filter @nbboss/api dev
-```
-
-也可使用：
-
-```bash
-pnpm dev
-```
-
-该命令启动 API 和 Web，Worker 仍需单独启动。
-
-## 8. 数据库与迁移
-
-Prisma Schema 位于：
-
-```text
-apps/api/prisma/schema.prisma
-```
-
-开发环境创建迁移：
-
-```bash
-pnpm --filter @nbboss/api exec prisma migrate dev --name <migration_name>
-```
-
-重新生成 Client：
-
-```bash
-pnpm db:generate
-```
-
-生产式/Compose 启动使用：
-
-```bash
-pnpm --filter @nbboss/api exec prisma migrate deploy
-```
-
-不要使用 `prisma db push` 代替正式迁移提交。新增跨实体关联时，除了服务层用户 Scope，还应评估是否需要数据库级租户完整性约束。
-
-## 9. Agent Runtime 开发约束
-
-- Agent 入口必须经 `AgentRuntimePort`，Controller 和领域服务不得直接依赖 Pi 事件类型；
-- 使用 Pi Agent 高层 `Agent` 类，不另建自定义循环；
-- 自定义模型由 `PiModelsService` 注册为 OpenAI-compatible Provider；
-- PostgreSQL transcript 用于恢复会话，Pi 不保存第二份业务真相；
-- `beforeToolCall` 校验租户、资源归属、模式、功能开关和工具额度；
-- `afterToolCall` 截断并脱敏返回内容；
-- 浏览器只消费稳定的内部 SSE 事件；
-- 有副作用的工具必须串行并带领域幂等键；
-- Provider 错误、工具错误、中止、重启中断和最大轮次必须映射为不同状态。
-
-当前主要领域工具：
-
-- `retrieve_documents`
-- `retrieve_memory`
-- `search_web`
-- `analyze_meeting`
-- `generate_presentation`
-
-会议结构化提交和 PPT 结构化提交同样由 Pi Agent + TypeBox 工具 Schema 驱动，进入领域层后再使用 Zod 严格校验。
-
-## 10. 后台任务与一致性
-
-BullMQ 队列名为 `nbboss`，当前任务包括：
-
-- `file.parse`
-- `meeting.analyze`
-- `memory.extract`
-- `presentation.generate`
-
-实现约束：
-
-- TXT 同批上传通过延迟去重合并成一次分析；
-- 相同会议文件快照的重复任务直接复用结果，避免重复待办和邮件；
-- 确定性输入错误不进行无意义重试；
-- Provider 临时错误有限重试；重试耗尽前领域状态保持处理中；
-- 长模型任务使用覆盖 Provider 超时窗口的 BullMQ 锁；
-- 来源删除后，迟到的文件和记忆任务必须安全结束，不能恢复孤儿数据；
-- PPT 保存使用 Redis 锁生成连续、不可变版本；
-- 会话/文件删除先原子移动到 trash，数据库成功后异步清理，数据库失败则恢复文件。
-
-## 11. 测试
-
-### 11.1 静态检查与单元测试
-
-```bash
-pnpm -r typecheck
-pnpm -r test
-```
-
-覆盖共享契约、风险 Schema、检索排序、Adapter、Pi Agent 事件、工具失败、最大轮次、中止、Provider 超时/限流、记忆冲突、日期/颜色规范化等。
-
-### 11.2 集成测试
-
-先启动完整 Compose 环境，然后执行：
-
-```bash
-set -a
-source .env
-set +a
-pnpm test:integration
-```
-
-覆盖真实 PostgreSQL/Redis/API/Worker、Refresh Rotation、IDOR、数据库租户约束、文件生命周期、200 页 PDF、BM25、多 PDF 引用、会议缓存、记忆删除竞态、PPT 并发版本和 10 用户并发。
-
-### 11.3 E2E
-
-```bash
-pnpm test:e2e
-```
-
-Playwright 默认访问 `http://localhost:3000`，覆盖注册、会话模式、未登录跳转、上传、工具状态、待办、记忆、PPT 编辑和 1050px 桌面断点。
-
-### 11.4 完整验收
-
-```bash
-pnpm -r typecheck
-pnpm -r test
-docker compose up -d --build
-set -a && source .env && set +a
-pnpm test:integration
-pnpm test:e2e
-```
-
-最新验收结果与真实 Provider 证据见 [`doc/adr/0001-acceptance-evidence.md`](doc/adr/0001-acceptance-evidence.md)。
-
-## 12. API 与 SSE
-
-所有业务 API 位于 `/api`，认证使用 HttpOnly Cookie。主要接口：
-
-| 方法 | 路径 | 用途 |
-|---|---|---|
-| POST | `/api/auth/register` | 注册并登录 |
-| POST | `/api/auth/login` | 登录 |
-| POST | `/api/auth/refresh` | Refresh Token 轮换 |
-| POST | `/api/auth/logout` | 注销 Refresh Token |
-| GET/POST | `/api/conversations` | 会话列表/创建 |
-| GET/DELETE | `/api/conversations/:id` | 会话详情/级联删除 |
-| POST | `/api/conversations/:id/messages` | SSE Agent 对话 |
-| POST | `/api/conversations/:id/runs/:runId/abort` | 服务端中止 |
-| POST | `/api/conversations/:id/files` | 上传 PDF/TXT |
-| GET/DELETE | `/api/files/:id` | 下载/删除文件 |
-| GET | `/api/conversations/:id/meetings` | 会议结果 |
-| POST | `/api/conversations/:id/meetings/reanalyze` | 强制重新分析 |
-| GET | `/api/todos` | 筛选待办 |
-| PATCH/DELETE | `/api/todos/:id` | 修改/删除待办 |
-| GET | `/api/memories` | 记忆及历史 |
-| PATCH | `/api/memories/facts/:id` | 修正当前事实 |
-| DELETE | `/api/memories/:id` | 删除记忆实体 |
-| POST | `/api/conversations/:id/presentations` | 创建 PPT 任务 |
-| GET/POST | `/api/presentations/:id/versions` | 查看/保存版本 |
-| GET | `/api/presentation-versions/:id/download` | 下载 PPTX |
-
-SSE 事件包括：
-
-- `run.started`
-- `message.delta`
-- `message.completed`
-- `tool.started`
-- `tool.completed`
-- `artifact.created`
-- `run.completed`
-- `run.failed`
-- `run.aborted`
-
-完整请求和响应说明见 [`doc/api.md`](doc/api.md)。
-
-## 13. 安全要求
-
-- 密码必须使用 Argon2id；
-- Refresh Token 数据库只保存 SHA-256 哈希；
-- Access/Refresh Token 使用 HttpOnly、SameSite Cookie；
-- 所有资源查询必须包含当前用户 Scope；
-- 上传必须同时校验扩展名、MIME、大小、PDF 签名和 TXT UTF-8；
-- 文件磁盘名必须使用随机 UUID；
-- 日志不得写入密码、Cookie、Token、API Key、完整提示词或完整用户文件；
-- Provider 原始错误不得直接返回给浏览器；
-- `.env` 权限建议保持 `0600`；
-- 如果密钥曾通过聊天、截图或其他非密钥渠道暴露，必须轮换。
-
-## 14. 扩展点
-
-### 新模型 Provider
-
-在 `PiModelsService` 中通过 Pi AI 的 `createModels()` / `createProvider()` 注册，并保持 `AgentRuntimePort` 接口不变。为 Provider 增加成功、超时、限流、认证失败和畸形响应契约测试。
-
-### 新搜索 Provider
-
-扩展 `SearchService`，返回统一的 `title/url/snippet/retrievedAt`。必须过滤非 HTTP(S) URL，并确保搜索仅在用户手动开启时调用。
-
-### 新邮件 Provider
-
-扩展 `MailService` Adapter，不要把供应商特例写进会议领域服务。必须保留固定收件地址、有限重试、错误脱敏和投递状态。
-
-### 新 Agent 工具
-
-工具必须：
-
-1. 使用 TypeBox 声明参数；
-2. 在执行前校验用户和资源边界；
-3. 对结果进行长度限制与脱敏；
-4. 明确是否有副作用；
-5. 有副作用时提供幂等键并串行执行；
-6. 添加 Pi Faux 契约测试和跨用户安全测试。
-
-## 15. 故障排查
-
-### API 不健康
-
-```bash
-docker compose ps
-docker compose logs api postgres redis
-curl -i http://localhost:3001/api/health/ready
-```
-
-### Worker 没有处理任务
-
-```bash
-docker compose logs worker redis
-```
-
-确认 API 与 Worker 使用同一镜像：
-
-```bash
-docker inspect out-brain-api-1 out-brain-worker-1 \
-  --format '{{.Name}} {{.Image}} {{.State.Status}}'
-```
-
-### 文件一直处于 PROCESSING
-
-检查 Worker、Redis 和上传 Volume；确认 API 与 Worker 都挂载到 `/app/data/uploads`。
-
-### 模型请求失败
-
-核对 `LLM_BASE_URL`、`LLM_MODEL` 和本机 `.env` 中的 Key。根据页面参考编号查询结构化日志，不要把真实 Key 粘贴到终端输出、Issue 或聊天中。
-
-### 数据库 Schema 不一致
-
-```bash
-pnpm --filter @nbboss/api exec prisma migrate status
-pnpm --filter @nbboss/api exec prisma migrate deploy
-pnpm db:generate
-```
-
-### 清理失败任务（仅开发环境）
-
-优先检查错误原因和修复代码，不要在生产环境直接清队列。开发环境确认数据可丢弃后，可通过 BullMQ API 或删除对应 Redis Volume 重置。
-
-## 16. 演示数据
-
-会议分析示例位于：
-
-```text
-demo/meeting-files/
-```
-
-使用说明见 [`demo/meeting-files/README.md`](demo/meeting-files/README.md)。
-
-## 17. 许可证注意事项
-
-项目使用的主要第三方组件及许可证见 [`doc/third-party-licenses.md`](doc/third-party-licenses.md)。PPTist 相关方案允许采用 AGPL-3.0 组件，但进入正式产品前必须由法务或开源治理团队确认分发和网络服务义务。
+原始需求和产品材料保存在 `doc/requirements/`。README 负责整体架构，操作细节保留在上述文档中。

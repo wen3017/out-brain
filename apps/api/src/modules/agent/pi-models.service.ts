@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, ServiceUnavailableException } from "@nestjs/common";
 import { createModels, createProvider, type Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -29,6 +29,7 @@ export class PiModelsService {
   }
 
   readonly stream = ((model: Parameters<typeof this.models.streamSimple>[0], context: Parameters<typeof this.models.streamSimple>[1], options?: Parameters<typeof this.models.streamSimple>[2]) => {
+    if (process.env.LLM_ENABLED === "false") throw new ServiceUnavailableException("模型服务未启用，请配置后重启");
     const timeoutMs = this.timeoutMs();
     // The OpenAI SDK timeout only covers creation of the streaming response on
     // some compatible servers. Compose an abort signal as a hard wall-clock
@@ -55,6 +56,7 @@ export class PiModelsService {
   }) as typeof this.models.streamSimple;
 
   async completeJson(prompt: string, signal?: AbortSignal): Promise<string> {
+    if (process.env.LLM_ENABLED === "false") throw new ServiceUnavailableException("模型服务未启用，请配置后重启");
     const response = await this.models.complete(this.model, { messages: [
       { role: "system", content: "只输出符合要求的 JSON，不要使用 Markdown 代码块。", timestamp: Date.now() },
       { role: "user", content: prompt, timestamp: Date.now() },

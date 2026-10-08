@@ -31,6 +31,15 @@ describe("provider adapters", () => {
     expect(results).toEqual([expect.objectContaining({ title: "safe", url: "https://example.test/source" })]);
   });
 
+  it("distinguishes empty search results from malformed provider responses", async () => {
+    process.env.SEARCH_ENABLED="true"; process.env.SEARCH_PROVIDER="tavily"; process.env.SEARCH_API_KEY="test";
+    const fetch = vi.spyOn(globalThis,"fetch");
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({results:[]})));
+    expect(await new SearchService().search("query")).toEqual([]);
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({error:"provider failed"})));
+    await expect(new SearchService().search("query")).rejects.toThrow("无效结果");
+  });
+
   it("records disabled and mock-sent email states", async () => {
     const create = vi.fn(async ({ data }: any) => ({ id: "mail-1", ...data }));
     const update = vi.fn(async ({ data }: any) => ({ id: "mail-1", ...data }));
@@ -46,8 +55,8 @@ describe("provider adapters", () => {
     vi.useFakeTimers();
     const create = vi.fn(async ({ data }: any) => ({ id: "mail-2", ...data }));
     const update = vi.fn(async ({ data }: any) => ({ id: "mail-2", ...data }));
-    const sendMail = vi.fn(async () => { throw new Error("secret smtp diagnostic"); });
-    vi.spyOn(nodemailer, "createTransport").mockReturnValue({ sendMail } as any);
+    const sendMail = vi.fn(async () => { throw Object.assign(new Error("secret smtp diagnostic"), {code:"ETIMEDOUT",command:"CONN"}); });
+    vi.spyOn(nodemailer, "createTransport").mockReturnValue({ sendMail, close: vi.fn() } as any);
     process.env.SMTP_ENABLED = "true";
     process.env.SMTP_PROVIDER = "smtp";
     process.env.SMTP_HOST = "smtp.example.test";
@@ -57,7 +66,7 @@ describe("provider adapters", () => {
     await vi.runAllTimersAsync();
     const result = await promise;
     expect(sendMail).toHaveBeenCalledTimes(3);
-    expect(result).toMatchObject({ status: "FAILED", errorCode: "Error" });
+    expect(result).toMatchObject({ status: "FAILED", errorCode: "SMTP_CONNECTION_FAILED" });
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ attempts: 3 }) }));
     expect(JSON.stringify(update.mock.calls)).not.toContain("secret smtp diagnostic");
     vi.useRealTimers();

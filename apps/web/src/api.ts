@@ -4,7 +4,7 @@ let refreshRequest: Promise<boolean> | undefined;
 async function authenticatedFetch(path: string, options: RequestInit): Promise<Response> {
   const request = () => fetch(`${API}${path}`, { ...options, credentials: "include", headers: { ...(options.body instanceof FormData ? {} : { "content-type": "application/json" }), ...options.headers } });
   let response = await request();
-  if (response.status === 401 && !path.startsWith("/auth/")) {
+  if (response.status === 401 && (!path.startsWith("/auth/") || path === "/auth/password")) {
     refreshRequest ??= fetch(`${API}/auth/refresh`, { method: "POST", credentials: "include" })
       .then(result => result.ok).finally(() => { refreshRequest = undefined; });
     if (await refreshRequest) response = await request();
@@ -29,7 +29,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return response.status === 204 ? undefined as T : response.json();
 }
 
-export async function streamMessage(conversationId: string, content: string, webSearch: boolean, onEvent: (event: any) => void, signal: AbortSignal) {
+export async function streamMessage(conversationId: string, content: string, webSearch: boolean | "auto" | "on" | "off", onEvent: (event: any) => void, signal: AbortSignal) {
   const response = await authenticatedFetch(`/conversations/${conversationId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content, webSearch }), signal });
   await checkResponse(response);
   if (!response.body) throw new Error("无法建立对话流");

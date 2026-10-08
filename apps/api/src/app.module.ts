@@ -1,4 +1,8 @@
 import { Module } from "@nestjs/common";
+import { validateEnvironment } from "./common/environment.js";
+import { RequestLimits, AuthRateGuard, AiQuotaGuard } from "./common/request-limits.js";
+import { LogsController } from "./modules/logs/logs.controller.js";
+import { LogsService } from "./modules/logs/logs.service.js";
 import { ConfigModule } from "@nestjs/config";
 import { HealthController } from "./health.controller.js";
 import { PrismaService } from "./infra/prisma.service.js";
@@ -29,8 +33,9 @@ import { JobsService } from "./infra/jobs.service.js";
 import { JobsProcessor } from "./infra/jobs.processor.js";
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true, envFilePath: [".env", "../../.env"] })],
+  imports: [ConfigModule.forRoot({ isGlobal: true, envFilePath: [".env", "../../.env"], validate: validateEnvironment })],
   controllers: [
+    LogsController,
     HealthController,
     AuthController,
     ConversationsController,
@@ -41,6 +46,8 @@ import { JobsProcessor } from "./infra/jobs.processor.js";
     PresentationsController,
   ],
   providers: [
+    RequestLimits, AuthRateGuard, AiQuotaGuard,
+    LogsService,
     PrismaService,
     AuthService,
     JwtAuthGuard,

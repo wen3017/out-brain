@@ -1,4 +1,5 @@
 import { extractPdf } from "./pdf-extraction.js";
+import { UPLOAD_LIMITS } from "@nbboss/contracts";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -15,38 +16,60 @@ export class FilesService {
   constructor(private readonly prisma: PrismaService, private readonly conversations: ConversationsService, private readonly embeddings: EmbeddingService, private readonly jobs: JobsService) {}
 
   async save(userId: string, conversationId: string, file: Express.Multer.File, deferQueue = false) {
-    const conversation = await this.conversations.assertOwned(userId, conversationId);
-    const {ext,kind} = this.validateUpload(file,conversation.mode);
-    const hash = createHash("sha256").update(file.buffer).digest("hex");
-    let writtenPath: string | undefined;
-    let result;
+    const assets = await this.persistBatch(userId, conversationId, [file]);
+    if (!deferQueue && assets[0].status === "PROCESSING") await this.enqueue(assets[0].id);
+    return assets[0];
+  }
+
+  async saveBatch(userId: string, conversationId: string, files: Express.Multer.File[]) {
+    const assets = await this.persistBatch(userId, conversationId, files);
+    const results = await Promise.allSettled([...new Map(assets.map(asset => [asset.id, asset])).values()].filter(asset => asset.status === "PROCESSING").map(asset => this.enqueue(asset.id)));
+    if (results.some(result => result.status === "rejected")) throw new BadRequestException("文件已保存，部分任务入队失败，请在文件面板重试");
+    return assets;
+  }
+
+  private async persistBatch(userId: string, conversationId: string, files: Express.Multer.File[]) {
+    await this.validateBatch(userId, conversationId, files);
+    const writtenPaths: string[] = [];
     try {
-      result = await this.prisma.$transaction(async tx => {
-        // Scope the lock to the owner, conversation, type and bytes. Other
-        // conversations never reuse this asset or its storage path.
-        const key = `${userId}:${conversationId}:${kind}:${hash}`;
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
-        const existing = await tx.fileAsset.findFirst({ where: { userId, conversationId, kind, sha256: hash }, orderBy: { createdAt: "asc" } });
-        if (existing) return { asset: existing, created: false };
-        const id = randomUUID(); const dir = join(this.root, userId, conversationId);
-        await mkdir(dir, { recursive: true });
-        const finalPath = join(dir, `${id}${ext}`); writtenPath = finalPath;
-        await writeFile(finalPath, file.buffer, { mode: 0o600 });
-        const asset = await tx.fileAsset.create({ data: {
-          id, userId, conversationId, kind, originalName: file.originalname.slice(0,255), storagePath: finalPath,
-          mimeType: file.mimetype, size: file.size, sha256: hash, status: "PROCESSING",
-        }});
-        if (conversation.mode === "MEETING") await tx.conversation.update({ where: { id: conversationId }, data: { meetingStatus: "PROCESSING", meetingErrorMessage: null } });
-        return { asset, created: true };
-      });
-    } catch(error) { if(writtenPath) await rm(writtenPath,{force:true}); throw error; }
-    if(result.created && !deferQueue) await this.enqueue(result.asset.id);
-    return result.asset;
+      return await this.prisma.$transaction(async tx => {
+        // Serialize all uploads for one owner, including across conversations.
+        // One transaction ensures that quota failure never leaves a half-saved batch.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`storage:${userId}`}, 0))`;
+        const used = await tx.fileAsset.aggregate({ where: { userId }, _sum: { size: true } });
+        let size = used._sum.size ?? 0;
+        const assets = [];
+        for (const file of files) {
+          const ext = extname(file.originalname).toLowerCase();
+          const kind = ext === ".pdf" ? "PDF" : "TXT";
+          const hash = createHash("sha256").update(file.buffer).digest("hex");
+          const existing = await tx.fileAsset.findFirst({ where: { userId, conversationId, kind, sha256: hash }, orderBy: { createdAt: "asc" } });
+          if (existing) { assets.push(existing); continue; }
+          size += file.size;
+          if (size > Number(process.env.USER_STORAGE_MB ?? 1024) * 1024 * 1024) throw new BadRequestException("账号上传存储额度不足，请删除不再需要的文件或联系维护人员");
+          const id = randomUUID(); const dir = join(this.root, userId, conversationId);
+          await mkdir(dir, { recursive: true });
+          const storagePath = join(dir, `${id}${ext}`); writtenPaths.push(storagePath);
+          await writeFile(storagePath, file.buffer, { mode: 0o600 });
+          assets.push(await tx.fileAsset.create({ data: {
+            id, userId, conversationId, kind, originalName: file.originalname.slice(0, 255), storagePath,
+            mimeType: file.mimetype, size: file.size, sha256: hash, status: "PROCESSING",
+          } }));
+        }
+        if (writtenPaths.length) await tx.conversation.updateMany({ where: { id: conversationId, mode: "MEETING" }, data: { meetingStatus: "PROCESSING", meetingErrorMessage: null } });
+        return assets;
+      }, { maxWait: 15_000, timeout: 30_000 });
+    } catch (error) {
+      await Promise.allSettled(writtenPaths.map(path => rm(path, { force: true })));
+      throw error;
+    }
   }
 
   async validateBatch(userId:string,conversationId:string,files:Express.Multer.File[]) {
     const conversation=await this.conversations.assertOwned(userId,conversationId);
     if(!files?.length)throw new BadRequestException("请选择要上传的文件");
+    if (files.length > UPLOAD_LIMITS.files) throw new BadRequestException("每批最多上传 20 个文件");
+    if (files.reduce((sum,file) => sum + file.size,0) > UPLOAD_LIMITS.batchBytes) throw new BadRequestException("每批文件总大小不能超过 50 MB");
     for(const file of files)this.validateUpload(file,conversation.mode);
   }
 

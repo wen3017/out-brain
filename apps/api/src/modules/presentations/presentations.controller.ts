@@ -1,3 +1,4 @@
+import { AiQuotaGuard } from "../../common/request-limits.js";
 import { Body, Controller, Get, Param, Post, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
 import { z } from "zod";
@@ -6,7 +7,7 @@ import { CurrentUser, type AuthUser } from "../../common/current-user.js";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { PresentationsService } from "./presentations.service.js";
 
-@Controller() @UseGuards(JwtAuthGuard)
+@Controller() @UseGuards(JwtAuthGuard, AiQuotaGuard)
 export class PresentationsController {
   constructor(private readonly presentations: PresentationsService) {}
   @Post("presentations/:id/retry") retry(@CurrentUser() user: AuthUser, @Param("id") id: string) { return this.presentations.retry(user.id, id); }

@@ -92,6 +92,7 @@ model User {
   id            String         @id @default(uuid())
   username      String         @unique @db.VarChar(64)
   passwordHash  String
+  authVersion   Int            @default(0)
   createdAt     DateTime       @default(now())
   conversations Conversation[]
   refreshTokens RefreshToken[]
@@ -100,6 +101,30 @@ model User {
   memoryExtractions MemoryExtraction[]
   agentRuns     AgentRun[]
   files         FileAsset[]
+  activityLogs  ActivityLog[]
+}
+
+model ActivityLog {
+  id         String   @id @default(uuid())
+  createdAt  DateTime @default(now())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  level      String   @db.VarChar(8)
+  service    String   @db.VarChar(16)
+  category   String   @db.VarChar(16)
+  operation  String   @db.VarChar(120)
+  status     String   @db.VarChar(24)
+  traceId    String   @db.VarChar(160)
+  resourceId String?  @db.VarChar(160)
+  errorCode  String?  @db.VarChar(64)
+  durationMs Int?
+  attempt    Int?
+  httpStatus Int?
+
+  @@index([userId, createdAt, id])
+  @@index([userId, level, createdAt])
+  @@index([userId, traceId])
+  @@index([createdAt])
 }
 
 model RefreshToken {

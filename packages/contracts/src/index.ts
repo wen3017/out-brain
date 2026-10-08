@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const UPLOAD_LIMITS = { files: 20, pdfBytes: 20 * 1024 * 1024, txtBytes: 5 * 1024 * 1024, batchBytes: 50 * 1024 * 1024 } as const;
+
 export const conversationModeSchema = z.enum(["CHAT", "MEETING"]);
 export type ConversationMode = z.infer<typeof conversationModeSchema>;
 
@@ -10,7 +12,7 @@ export const createConversationSchema = z.object({
 
 export const sendMessageSchema = z.object({
   content: z.string().trim().min(1).max(50_000),
-  webSearch: z.boolean().default(false),
+  webSearch: z.union([z.boolean(), z.enum(["auto", "on", "off"])]).default("auto"),
 });
 
 export const todoStatusSchema = z.enum(["PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"]);

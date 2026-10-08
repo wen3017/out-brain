@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $script:LocalRoot = Join-Path $script:ProjectRoot '.local'
@@ -29,7 +29,7 @@ function Invoke-LoggedNative([string]$Executable, [string[]]$Arguments, [string]
 
 function Read-ProjectEnv {
     $path = Join-Path $script:ProjectRoot '.env'
-    if (!(Test-Path -LiteralPath $path)) { throw 'Missing .env. Run setup.cmd first.' }
+    if (!(Test-Path -LiteralPath $path)) { throw 'Missing .env. Run start.cmd setup first.' }
     $values = @{}
     $lineNumber = 0
     foreach ($line in [IO.File]::ReadAllLines($path)) {
@@ -94,6 +94,7 @@ function Read-ExternalLlmConfig {
         $apiKey = $credential.GetNetworkCredential().Password
         if (!$apiKey) { throw 'Empty provider key.' }
         return @{
+            LLM_ENABLED = 'true'
             LLM_BASE_URL = [string]$config.baseUrl
             LLM_MODEL = [string]$config.model
             LLM_API_KEY = $apiKey
@@ -105,7 +106,7 @@ function Read-ExternalLlmConfig {
 }
 
 function Get-LocalServicePort([hashtable]$Values, [string]$Key, [int]$DefaultPort) {
-    if (!$Values.ContainsKey($Key) -or !$Values[$Key]) { throw "Missing $Key in .env. Run setup.cmd first." }
+    if (!$Values.ContainsKey($Key) -or !$Values[$Key]) { throw "Missing $Key in .env. Run start.cmd setup first." }
     $parsed = $null
     if (![Uri]::TryCreate($Values[$Key], [UriKind]::Absolute, [ref]$parsed)) { throw "Invalid $Key in .env." }
     if ($parsed.Host -notin @('localhost', '127.0.0.1', '[::1]', '::1')) {
@@ -158,7 +159,7 @@ function Test-OwnedProcess([int]$ProcessId, [int]$OwnerId) {
 
 function Assert-ServicePort([string]$Name, [int]$Port) {
     $record = Get-ManagedRecord $Name
-    if ($record -and [int]$record.port -ne $Port) { throw "$Name is already running with a different port. Run stop.cmd before changing .env." }
+    if ($record -and [int]$record.port -ne $Port) { throw "$Name is already running with a different port. Run start.cmd stop before changing .env." }
     foreach ($ownerId in @(Get-PortOwners $Port)) {
         if (!$record -or !(Test-OwnedProcess ([int]$ownerId) ([int]$record.pid))) {
             throw "Port $Port is occupied by another process (PID $ownerId). Stop that program or change the project port; the launcher will not take it over."
@@ -192,6 +193,20 @@ function Wait-ServiceHttp([string]$Name, [string]$Url, [int]$TimeoutSeconds = 90
         Start-Sleep -Milliseconds 600
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "$Name did not become ready at $Url. Check $script:LogRoot."
+}
+
+function Archive-ServiceLogs([string]$Name) {
+    if ($Name -notin @('api', 'worker', 'web', 'redis')) { throw 'Unsupported log service.' }
+    if (Get-ManagedRecord $Name) { throw 'Cannot archive logs while the service is running.' }
+    $archiveDirectory = Join-Path $script:LogRoot 'archive'
+    [System.IO.Directory]::CreateDirectory($archiveDirectory) | Out-Null
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-ffff'
+    foreach ($stream in @('stdout', 'stderr')) {
+        $source = Join-Path $script:LogRoot "$Name.$stream.log"
+        if ((Test-Path -LiteralPath $source) -and (Get-Item -LiteralPath $source).Length -gt 0) {
+            Move-Item -LiteralPath $source -Destination (Join-Path $archiveDirectory "$Name.$stamp.$stream.log") -ErrorAction Stop
+        }
+    }
 }
 
 function Stop-ManagedService([string]$Name) {

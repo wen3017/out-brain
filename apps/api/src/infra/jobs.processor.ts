@@ -1,3 +1,4 @@
+import { writeLog } from "../common/activity-log.js";
 import { BadRequestException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { UnrecoverableError, Worker } from "bullmq";
 import { PrismaService } from "./prisma.service.js";
@@ -7,7 +8,6 @@ import { MemoriesService } from "../modules/memories/memories.service.js";
 import { JobsService } from "./jobs.service.js";
 import { PresentationsService } from "../modules/presentations/presentations.service.js";
 import { safeErrorMeta } from "../common/safe-error.js";
-import { createHash } from "node:crypto";
 import { MailService } from "../modules/mail/mail.service.js";
 
 @Injectable()
@@ -38,13 +38,13 @@ export class JobsProcessor implements OnModuleInit, OnModuleDestroy {
           const job=await this.jobs.queue.getJob(`memory-${task.id}`);const state=job?await job.getState():"missing";
           if(!["active","waiting","delayed"].includes(state))await this.prisma.memoryExtraction.updateMany({where:{id:task.id,status:{in:["PENDING","PROCESSING"]}},data:{status:"FAILED",errorMessage:"后台任务已中断或丢失，请重试抽取"}});
         }
-      }catch{console.error("worker heartbeat/recovery failed");}finally{this.heartbeatRunning=false;}
+      }catch{writeLog({category:"SYSTEM",level:"ERROR",operation:"worker.recovery",status:"FAILED",errorCode:"RECOVERY_FAILED"});}finally{this.heartbeatRunning=false;}
     };
     void heartbeat();this.heartbeatTimer=setInterval(()=>void heartbeat(),5000);this.heartbeatTimer.unref();
     this.mailTimer = setInterval(() => {
       if (this.flushingMail) return;
       this.flushingMail = true;
-      void this.mail.flushPending().catch(() => console.error('mail.delivery failed; retry from the meeting panel')).finally(() => { this.flushingMail = false; });
+      void this.mail.flushPending().catch(() => writeLog({category:"SYSTEM",level:"ERROR",operation:"mail.delivery",status:"FAILED",errorCode:"DELIVERY_FAILED"})).finally(() => { this.flushingMail = false; });
     }, 5000);
     this.mailTimer.unref();
     this.worker = new Worker("nbboss", async (job) => {
@@ -87,7 +87,7 @@ export class JobsProcessor implements OnModuleInit, OnModuleDestroy {
         } else {
           throw new UnrecoverableError("UNKNOWN_JOB_TYPE");
         }
-        console.info(JSON.stringify({ level: "info", traceId: job.id, user: this.userHash(userId), resource, job: job.name, status: "COMPLETED", durationMs: Date.now() - startedAt, attempt: job.attemptsMade + 1 }));
+        writeLog({category:"TASK",userId,traceId:String(job.id),resourceId:resource,operation:job.name,status:"COMPLETED",durationMs:Date.now()-startedAt,attempt:job.attemptsMade+1});
       } catch (error) {
         const meta = safeErrorMeta(error);
         const attempt = job.attemptsMade + 1;
@@ -100,7 +100,7 @@ export class JobsProcessor implements OnModuleInit, OnModuleDestroy {
         if (final && job.name === "presentation.generate") {
           await this.prisma.presentation.updateMany({ where: { id: job.data.presentationId, conversation: { userId: job.data.userId } }, data: { status: "FAILED", errorMessage: error instanceof BadRequestException ? error.message : `PPT 生成失败，系统已记录（参考编号：${traceId}）` } });
         }
-        console.error(JSON.stringify({ level: "error", traceId, user: this.userHash(userId), resource, job: job.name, status: final ? "FAILED" : "RETRYING", durationMs: Date.now() - startedAt, attempt, errorCode: error instanceof UnrecoverableError ? error.message : meta.errorCode }));
+        writeLog({category:"TASK",userId,level:final?"ERROR":"WARN",traceId,resourceId:resource,operation:job.name,status:final?"FAILED":"RETRYING",durationMs:Date.now()-startedAt,attempt,errorCode:error instanceof UnrecoverableError && /^[A-Z_]+$/.test(error.message)?error.message:meta.errorCode});
         throw error;
       }
     }, {
@@ -113,5 +113,4 @@ export class JobsProcessor implements OnModuleInit, OnModuleDestroy {
     });
   }
   async onModuleDestroy() { if(this.heartbeatTimer)clearInterval(this.heartbeatTimer); if (this.mailTimer) clearInterval(this.mailTimer); await this.worker?.close(); }
-  private userHash(userId?: string) { return userId ? createHash("sha256").update(userId).digest("hex").slice(0, 12) : "unknown"; }
 }

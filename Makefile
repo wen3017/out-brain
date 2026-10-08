@@ -18,7 +18,7 @@ help:
 	  'make verify       Run all automated checks'
 
 setup:
-	@if test -f .env; then echo '.env already exists; leaving it unchanged.'; else cp .env.example .env && echo 'Created .env. Configure LLM_API_KEY and replace both JWT secrets.'; fi
+	@if test -f .env; then echo '.env already exists; leaving it unchanged.'; else cp .env.example .env && echo 'Created .env. Set LLM_ENABLED=true with valid model credentials, and replace both JWT secrets.'; fi
 	@chmod 600 .env
 
 up:

@@ -36,5 +36,5 @@ $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
 Set-Acl -LiteralPath $directory -AclObject $acl
 [IO.File]::WriteAllText($path, ($values | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
-Write-Host 'Saved encrypted credentials outside the project. Run stop.cmd then start.cmd to apply.'
+Write-Host 'Saved encrypted credentials outside the project. Run start.cmd stop then start.cmd to apply.'
 Write-Host 'No email was sent by this configuration command.'

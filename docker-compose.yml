@@ -1,12 +1,13 @@
 services:
   postgres:
+    restart: unless-stopped
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: nbboss
       POSTGRES_PASSWORD: nbboss
       POSTGRES_DB: nbboss
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/001-vector.sql:ro
@@ -17,9 +18,13 @@ services:
       retries: 20
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -27,6 +32,7 @@ services:
       retries: 20
 
   api:
+    restart: unless-stopped
     image: nbboss-ai-brain-api:local
     build:
       context: .
@@ -34,11 +40,12 @@ services:
     env_file: .env
     environment:
       API_PORT: "3001"
+      TRUST_PROXY_HOPS: "1"
       DATABASE_URL: postgresql://nbboss:nbboss@postgres:5432/nbboss?schema=public
       REDIS_URL: redis://redis:6379
       STORAGE_ROOT: /app/data/uploads
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     volumes:
       - upload_data:/app/data/uploads
     depends_on:
@@ -51,6 +58,7 @@ services:
       retries: 30
 
   worker:
+    restart: unless-stopped
     image: nbboss-ai-brain-api:local
     env_file: .env
     environment:
@@ -62,16 +70,23 @@ services:
       - upload_data:/app/data/uploads
     depends_on:
       api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "apps/api/dist/worker-health.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
   web:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: apps/web/Dockerfile
     ports:
-      - "3000:80"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:3000:80"
     depends_on:
       api: { condition: service_healthy }
 
 volumes:
+  redis_data:
   postgres_data:
   upload_data:

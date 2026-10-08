@@ -1,4 +1,5 @@
 import { presentationTextNodes } from "../src/modules/presentations/presentation-grounding.js";
+import { FilesService } from "../src/modules/files/files.service.js";
 import { createCanvas } from "@napi-rs/canvas";
 import { extractPdf } from "../src/modules/files/pdf-extraction.js";
 import { TodosService } from "../src/modules/todos/todos.service.js";
@@ -326,6 +327,42 @@ integration("API auth, tenant isolation and cascade integration", () => {
     expect(await prisma.fileAsset.count({where:{conversationId:conversation.id}})).toBe(0);
   });
 
+  it("changes passwords and invalidates access and refresh credentials on every device", async () => {
+    const user = await register("password");
+    const second = await request(baseUrl).post("/api/auth/login").send({ username: user.username, password: "Integration123!" }).expect(201);
+    await request(baseUrl).post("/api/auth/password").set("Cookie", user.cookie).send({ currentPassword: "incorrect", newPassword: "ChangedPassword123!" }).expect(400);
+    await request(baseUrl).get("/api/conversations").set("Cookie", cookies(second)).expect(200);
+    await request(baseUrl).post("/api/auth/password").set("Cookie", user.cookie).send({ currentPassword: "Integration123!", newPassword: "ChangedPassword123!" }).expect(201);
+    await request(baseUrl).get("/api/conversations").set("Cookie", cookies(second)).expect(401);
+    await request(baseUrl).post("/api/auth/refresh").set("Cookie", cookieValue(second, "nbboss_refresh")).expect(401);
+    await request(baseUrl).post("/api/auth/login").send({ username: user.username, password: "Integration123!" }).expect(401);
+    await request(baseUrl).post("/api/auth/login").send({ username: user.username, password: "ChangedPassword123!" }).expect(201);
+  });
+
+  it("refuses an entire over-quota batch and serializes competing uploads", async () => {
+    const owner = await register("quota");
+    const conversation = await prisma.conversation.create({ data: { userId: owner.userId, mode: "CHAT", title: "quota" } });
+    const previousLimit = process.env.USER_STORAGE_MB;
+    process.env.USER_STORAGE_MB = "1";
+    const service = new FilesService(prisma as any, new ConversationsService(prisma as any) as any, {} as any, { parseFile: vi.fn() } as any);
+    const file = (name: string) => { const buffer = Buffer.alloc(600_000, name.charCodeAt(0)); buffer.write("%PDF-"); return { originalname: `${name}.pdf`, mimetype: "application/pdf", buffer, size: buffer.length } as Express.Multer.File; };
+    try {
+      await expect(service.saveBatch(owner.userId, conversation.id, [file("a"), file("b")])).rejects.toThrow("额度不足");
+      expect(await prisma.fileAsset.count({ where: { userId: owner.userId } })).toBe(0);
+      const results = await Promise.allSettled([service.save(owner.userId, conversation.id, file("a")), service.save(owner.userId, conversation.id, file("b"))]);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      expect(await prisma.fileAsset.count({ where: { userId: owner.userId } })).toBe(1);
+    } finally {
+      if (previousLimit === undefined) delete process.env.USER_STORAGE_MB; else process.env.USER_STORAGE_MB = previousLimit;
+      const assets = await prisma.fileAsset.findMany({ where: { userId: owner.userId } });
+      for (const asset of assets) await rm(asset.storagePath, { force: true });
+    }
+  });
+
+  it("rejects cross-origin mutations before executing them", async () => {
+    await request(baseUrl).post("/api/auth/login").set("Origin", "https://attacker.test").send({ username: "unused", password: "unused" }).expect(403);
+  });
+
   it("rejects oversized uploads and never derives storage paths from hostile filenames", async () => {
     const owner = await register("upload");
     const created = await request(baseUrl).post("/api/conversations").set("Cookie", owner.cookie).send({ mode: "CHAT", title: "upload-security" }).expect(201);
@@ -603,7 +640,7 @@ integration("API auth, tenant isolation and cascade integration", () => {
     }
   }, 15_000);
 
-  it("persists every manually enabled search call and restores its sources with history", async () => {
+  it("persists every automatically triggered search call and restores its sources with history", async () => {
     const owner = await register("search");
     const conversation = await prisma.conversation.create({ data: { userId: owner.userId, mode: "CHAT", title: "search persistence" } });
     const faux = fauxProvider();
@@ -630,7 +667,7 @@ integration("API auth, tenant isolation and cascade integration", () => {
     process.env.SEARCH_PROVIDER = "mock";
     const events: any[] = [];
     try {
-      await runtime.run({ userId: owner.userId, conversationId: conversation.id, content: "Give me current releases and market news", webSearch: true }, (event) => events.push(event));
+      await runtime.run({ userId: owner.userId, conversationId: conversation.id, content: "Give me current releases and market news", webSearch: "auto" }, (event) => events.push(event));
     } finally {
       previous.enabled === undefined ? delete process.env.SEARCH_ENABLED : process.env.SEARCH_ENABLED = previous.enabled;
       previous.provider === undefined ? delete process.env.SEARCH_PROVIDER : process.env.SEARCH_PROVIDER = previous.provider;

@@ -6,10 +6,10 @@
   "main": "dist/index.js",
   "types": "src/index.ts",
   "scripts": {
-    "postinstall": "tsc -p tsconfig.json",
-    "build": "tsc -p tsconfig.json",
+    "postinstall": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run src --passWithNoTests",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": { "zod": "4.1.11" },

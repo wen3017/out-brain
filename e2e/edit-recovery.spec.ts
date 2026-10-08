@@ -37,15 +37,19 @@ test('todo invalid dates and failed memory edits display actionable errors witho
  const seeded=await setup(page);
  try{
   await page.goto('/todos');
-  const answers=['确认截止时间','与团队确认方案截止时间','王芳','not-a-date'];
-  const answer=(dialog:any)=>dialog.accept(answers.shift());page.on('dialog',answer);
-  await page.getByTitle('编辑',{exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('截止时间无效');page.off('dialog',answer);
+  await page.getByLabel('截止日期起').fill('2026-10-20');
+  await page.getByLabel('截止日期止').fill('2026-10-01');
+  await expect(page.getByRole('alert')).toContainText('开始日期不能晚于结束日期');
+  await page.getByRole('button',{name:'重置条件',exact:true}).click();
   await expect(page.locator('.todo-row')).toContainText('截止：待确认');
   await page.getByRole('button',{name:'记忆管理',exact:true}).click();
   await page.route('**/api/memories/facts/*',route=>route.fulfill({status:503,json:{message:'暂时无法更新'}}));
-  page.once('dialog',dialog=>dialog.accept('苏州'));
   await page.getByTitle('编辑记忆').click();
-  await expect(page.getByRole('alert')).toContainText('修改失败');await expect(page.locator('.fact').filter({hasText:'杭州'})).toBeVisible();
+  await page.getByLabel('记忆内容').fill('苏州');
+  await page.getByRole('button',{name:'保存修改'}).click();
+  await expect(page.getByRole('alert')).toContainText('修改失败');await expect(page.getByLabel('记忆内容')).toHaveValue('苏州');
+  page.once('dialog',dialog=>dialog.accept());
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await expect(page.locator('.fact').filter({hasText:'杭州'})).toBeVisible();
  }finally{fixture('cleanup-user',{userId:seeded.user.id});}
 });

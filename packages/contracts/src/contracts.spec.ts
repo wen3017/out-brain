@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { meetingAnalysisSchema, presentationSchema } from "./index.js";
+import { meetingAnalysisSchema, presentationSchema, sendMessageSchema } from "./index.js";
 
 describe("domain contracts", () => {
+  it("defaults to automatic search and preserves explicit legacy opt-out", () => {
+    expect(sendMessageSchema.parse({content:"今天的新闻"}).webSearch).toBe("auto");
+    for (const webSearch of [true, false, "auto", "on", "off"]) expect(sendMessageSchema.parse({content:"问题",webSearch}).webSearch).toBe(webSearch);
+    expect(() => sendMessageSchema.parse({content:"问题",webSearch:"false"})).toThrow();
+  });
   it("rejects a meeting risk without source evidence", () => {
     expect(() => meetingAnalysisSchema.parse({ sourceFileIds: [], title: "周会", summary: "", participants: [], time: null, location: null, topics: [], decisions: [], commitments: [], insights: [], risks: [{ severity: "HIGH", description: "无人负责", evidence: [], todo: { title: "确定负责人", description: "", owner: "待确认", dueAt: null } }] })).toThrow();
   });

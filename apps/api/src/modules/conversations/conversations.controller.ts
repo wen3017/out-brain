@@ -1,3 +1,4 @@
+import { AiQuotaGuard } from "../../common/request-limits.js";
 import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Res, UseGuards } from "@nestjs/common";
 import type { Response } from "express";
 import { createConversationSchema, sendMessageSchema } from "@nbboss/contracts";
@@ -10,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { safeErrorMeta } from "../../common/safe-error.js";
 
 @Controller("conversations")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, AiQuotaGuard)
 export class ConversationsController {
   constructor(private readonly conversations: ConversationsService, @Inject(AGENT_RUNTIME_PORT) private readonly runtime: AgentRuntimePort) {}
 
@@ -28,6 +29,7 @@ export class ConversationsController {
   @Post(":id/messages")
   async message(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: unknown, @Res() res: Response) {
     const input = sendMessageSchema.parse(body);
+    if (process.env.LLM_ENABLED === "false") throw new BadRequestException("模型服务未启用，请联系维护人员配置后再试");
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");

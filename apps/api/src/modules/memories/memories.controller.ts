@@ -1,3 +1,4 @@
+import { AiQuotaGuard } from "../../common/request-limits.js";
 import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { CurrentUser, type AuthUser } from "../../common/current-user.js";
@@ -5,7 +6,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { JobsService } from "../../infra/jobs.service.js";
 import { MemoriesService } from "./memories.service.js";
 
-@Controller("memories") @UseGuards(JwtAuthGuard)
+@Controller("memories") @UseGuards(JwtAuthGuard, AiQuotaGuard)
 export class MemoriesController {
   constructor(private readonly memories: MemoriesService, private readonly jobs: JobsService) {}
   @Get("tasks") tasks(@CurrentUser() user: AuthUser) { return this.jobs.listMemoryTasks(user.id); }

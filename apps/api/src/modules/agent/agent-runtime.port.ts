@@ -2,7 +2,7 @@ export interface AgentRunInput {
   userId: string;
   conversationId: string;
   content: string;
-  webSearch: boolean;
+  webSearch: boolean | "auto" | "on" | "off";
 }
 
 export abstract class AgentRuntimePort {

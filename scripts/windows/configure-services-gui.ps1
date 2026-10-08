@@ -69,22 +69,33 @@ Add-Label '保存不会重启服务或发送邮件。留空的服务保持原配
 Add-Label '一、网易 163 邮箱' 92
 $senderBox = Add-Input '发件邮箱' 126
 $senderBox.Text = $SenderEmail
-$recipientBox = Add-Input '测试收件邮箱' 166
+$recipientBox = Add-Input '收件邮箱' 166
 $recipientBox.Text = $RecipientEmail
 $smtpBox = Add-Input 'SMTP 授权码' 206 $true
 Add-Label '授权码不是邮箱登录密码。请在邮箱设置中开启 SMTP 后获取。' 245
 Add-Button '打开网易邮箱' 22 281 { Start-Process 'https://mail.163.com/' }
+$mailEnabled = New-Object Windows.Forms.CheckBox
+$mailEnabled.Text = '启用邮件（重启后自动投递）'
+$mailEnabled.Location = New-Object Drawing.Point(240, 287)
+$mailEnabled.Size = New-Object Drawing.Size(210, 30)
+$form.Controls.Add($mailEnabled)
+if (Test-Path -LiteralPath $configPath) {
+    $saved = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
+    $mailEnabled.Checked = $saved.SMTP_ENABLED -eq 'true'
+    if (!$SenderEmail) { $senderBox.Text = [string]$saved.SMTP_FROM }
+    if (!$RecipientEmail) { $recipientBox.Text = [string]$saved.SMTP_TO }
+}
 Add-Button '保存邮箱配置' 457 281 {
     try {
         if ($senderBox.Text.Trim() -notmatch '^[^\s@]+@163\.com$') { throw '请填写有效的 163 发件地址。' }
-        if ($recipientBox.Text.Trim() -notmatch '^[^\s@]+@[^\s@]+\.[^\s@]+$') { throw '请明确填写测试收件邮箱。' }
+        if ($recipientBox.Text.Trim() -notmatch '^[^\s@]+@[^\s@]+\.[^\s@]+$') { throw '请明确填写收件邮箱。' }
         if (!$smtpBox.Text.Trim()) { throw '请填写 SMTP 授权码。' }
         Save-Settings @{
             SMTP_HOST='smtp.163.com'; SMTP_PORT='465'; SMTP_USER=$senderBox.Text.Trim(); SMTP_FROM=$senderBox.Text.Trim(); SMTP_TO=$recipientBox.Text.Trim()
-            SMTP_PASSWORD_DPAPI=(Encrypt-Input $smtpBox.Text.Trim()); SMTP_PROVIDER='smtp'; SMTP_ENABLED='false'
+            SMTP_PASSWORD_DPAPI=(Encrypt-Input $smtpBox.Text.Trim()); SMTP_PROVIDER='smtp'; SMTP_ENABLED=$mailEnabled.Checked.ToString().ToLowerInvariant()
         }
         $smtpBox.Clear()
-        $status.Text = '邮箱配置已加密保存，暂未启用发信。请告诉助手继续验证连接。'
+        $status.Text = '邮箱配置与启用状态已保存。重启 API 和 Worker 后生效。'
     } catch { [void][Windows.Forms.MessageBox]::Show('保存未完成。请检查邮箱、授权码及配置目录权限。', '配置提示') }
 }
 Add-Label '二、Tavily 联网搜索' 341
@@ -96,7 +107,7 @@ Add-Button '保存搜索配置' 457 452 {
         if (!$searchBox.Text.Trim()) { throw '请填写 Tavily API Key。' }
         Save-Settings @{ SEARCH_API_KEY_DPAPI=(Encrypt-Input $searchBox.Text.Trim()); SEARCH_ENABLED='true'; SEARCH_PROVIDER='tavily' }
         $searchBox.Clear()
-        $status.Text = '搜索配置已加密保存。请告诉助手继续验证并加载配置。'
+        $status.Text = '搜索配置已加密保存。重启 API 和 Worker 后生效。'
     } catch { [void][Windows.Forms.MessageBox]::Show('保存未完成。请检查 API Key 和配置目录权限。', '配置提示') }
 }
 $status = New-Object Windows.Forms.Label

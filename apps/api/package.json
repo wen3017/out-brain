@@ -31,7 +31,6 @@
     "bullmq": "5.61.2",
     "cookie-parser": "1.4.7",
     "ioredis": "5.8.2",
-    "nanoid": "5.1.6",
     "nodemailer": "7.0.10",
     "pdfjs-dist": "5.4.394",
     "pptxgenjs": "4.0.1",

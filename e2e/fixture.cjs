@@ -7,6 +7,14 @@ const [action, encoded = "e30="] = process.argv.slice(2);
 const input = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
 
 async function main() {
+  if (action === "seed-logs") {
+    const { randomUUID } = require("node:crypto");
+    const now = new Date();
+    const rows = Array.from({length:52}, (_,index) => ({id:randomUUID(),userId:input.userId,createdAt:now,level:index===0?'ERROR':'INFO',service:'api',category:'TASK',operation:'test.log_page',status:index===0?'FAILED':'COMPLETED',traceId:randomUUID(),errorCode:index===0?'TIMEOUT':null,durationMs:125}));
+    await prisma.activityLog.createMany({data:rows});
+    await prisma.activityLog.create({data:{id:randomUUID(),userId:input.userId,createdAt:new Date(Date.now()-(input.retentionDays+1)*86400000),level:'INFO',service:'api',category:'TASK',operation:'test.expired_log',status:'COMPLETED',traceId:randomUUID()}});
+    return {firstId:rows[0].id,traceId:rows[0].traceId};
+  }
   if (action === "seed-artifacts") {
     const { userId, conversationId, suffix } = input;
     const meeting = await prisma.meeting.create({ data: {
