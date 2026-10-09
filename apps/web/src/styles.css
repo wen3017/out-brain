@@ -2510,6 +2510,15 @@ input[type=checkbox] {
   border-left-color: #76a9d5;
 }
 
+.ppt-page .slide-canvas {
+  background: #f2f6fa;
+  border-left: 0;
+}
+
+.ppt-page .mini-slide {
+  background: #f2f6fa;
+}
+
 .slide-element.selected {
   border-color: #76a9d5;
 }

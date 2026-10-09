@@ -28,6 +28,21 @@ describe("PPT grounding gate",()=>{
   applyGroundingReview(doc,source,{items});
   expect(doc.slides[0].elements[0].text).toBe(source);
  });
+ it("keeps a reviewed Chinese translation of an English quote and records the source",()=>{
+  const doc=fixture();const source="The method balances efficiency and fairness in multi-UAV path planning.";
+  const items=presentationTextNodes(doc).map(({key,text})=>({key,text,kind:"HEADING",evidence:""}));
+  items[3]={...items[3],text:"该方法在多无人机路径规划中平衡效率与公平",kind:"FACT",evidence:source};
+  applyGroundingReview(doc,source,{items});
+  expect(doc.slides[0].elements[0].text).toBe("该方法在多无人机路径规划中平衡效率与公平");
+  expect(doc.slides[0].notes).toContain(source);
+ });
+ it("does not accept a new number in a translated factual claim",()=>{
+  const doc=fixture();const source="The experiment used 10 datasets.";
+  const items=presentationTextNodes(doc).map(({key,text})=>({key,text,kind:"HEADING",evidence:""}));
+  items[3]={...items[3],text:"实验使用了 100 组数据集",kind:"FACT",evidence:source};
+  applyGroundingReview(doc,source,{items});
+  expect(doc.slides[0].elements[0].text).toBe(source);
+ });
  it("downgrades only invalid evidence and fills omitted fields before publication",()=>{
   const doc=fixture();
   const review=conservativeGroundingReview(doc,"张总负责项目",{items:[{key:"0/element/0",text:"张总审批客户排期",kind:"FACT",evidence:"张总审批客户排期"}]});

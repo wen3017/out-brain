@@ -230,7 +230,7 @@ describe("presentation request parsing", () => {
     expect(reviewCount).toBe(2);
     reviewCount=0;alwaysInvalid=true;
     const conservative = await (service as any).createDocument("u","c","生成 1 页 PPT",async()=>{});
-    expect(conservative.slides[0].elements[0].text).toContain("待确认");
+    expect(conservative.slides[0].elements.some((element:any)=>element.type==="text"&&element.text.includes("待确认"))).toBe(true);
     expect(reviewCount).toBe(2);
   });
 
@@ -243,7 +243,7 @@ describe("presentation request parsing", () => {
     })};
     const service=new PresentationsService(db as any,models as any,{} as any,{} as any,{} as any);
     const result=await (service as any).createDocument("u","c","生成 1 页 PPT",async()=>{});
-    expect(result.slides[0].elements[0].text).toContain("待确认");
+    expect(result.slides[0].elements.some((element:any)=>element.type==="text"&&element.text.includes("待确认"))).toBe(true);
   });
 
   it("corrects invisible text on the slide background while retaining white text on dark panels",()=>{

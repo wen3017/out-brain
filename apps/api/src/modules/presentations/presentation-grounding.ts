@@ -51,7 +51,15 @@ export function applyGroundingReview(document:PresentationDocument,source:string
     // A real quote alone does not prove the model's paraphrase. Keep an
     // extractive fallback when it adds words beyond the supplied evidence.
     const compact=(value:string)=>value.replace(/[\s•·：:，,。；;（）()]/g,"");
-    if(item.kind==="FACT" && !compact(item.evidence).includes(compact(text)))text=item.evidence.trim();
+    // A reviewed Chinese translation can be shown on the slide while the
+    // verbatim English quote stays in notes. Reject added numbers/acronyms;
+    // otherwise the old exact-substring rule turned every paper deck into raw
+    // English extracts even after an independent fact review.
+    const evidenceTokens=new Set((item.evidence.match(/\d+(?:\.\d+)?|[A-Za-z]{2,}/g)??[]).map(token=>token.toLowerCase()));
+    const translated = item.kind==="FACT" && /[\u3400-\u9fff]/u.test(text) && !/[\u3400-\u9fff]/u.test(item.evidence)
+      && [...text.matchAll(/\d+(?:\.\d+)?|[A-Za-z]{2,}/g)].every(([token]) => evidenceTokens.has(token.toLowerCase()))
+      && !/(已完成|已通过|已审批|承诺|负责人|决策人|审批人)/.test(text);
+    if(item.kind==="FACT" && !compact(item.evidence).includes(compact(text)) && !translated)text=item.evidence.trim();
     if(item.kind==="HEADING" && text.trim() && !compact(source).includes(compact(text)) && (/\n|用于|负责|承诺|完成|已|预计|达到|审批/.test(text)||text.length>32))text="相关信息待确认（原始材料未提供依据）";
     if(item.kind==="SUGGESTION"&&!text.startsWith("建议（待确认）"))text=`建议（待确认）：${text}`;
     // A trailing qualifier on a multi-line block appears to qualify only its
