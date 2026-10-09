@@ -48,14 +48,40 @@ describe("Pi Agent runtime contract", () => {
 
   it("rejects a structured response that never calls the required submission tool", async () => {
     const { faux, models } = fixture();
-    faux.setResponses([fauxAssistantMessage([fauxText("not a structured submission")])]);
+    faux.setResponses([
+      fauxAssistantMessage([fauxText("not a structured submission")]),
+      fauxAssistantMessage([fauxText("still not a structured submission")]),
+    ]);
     const service = Object.create(PiModelsService.prototype) as PiModelsService & { model: unknown; stream: unknown };
     Object.defineProperties(service, {
       model: { value: faux.getModel() },
       stream: { value: models.streamSimple.bind(models) },
       timedOutSessions: { value: new Set<string>() },
     });
-    await expect(service.runStructuredAgent("test", "submit", "submit_result", Type.Object({ value: Type.String() }))).rejects.toThrow("Agent 未调用 submit_result");
+    await expect(service.runStructuredAgent("test", "submit", "submit_result", Type.Object({ value: Type.String() }))).rejects.toThrow("模型未返回符合 submit_result 结构的结果");
+  });
+
+  it("accepts a schema-valid JSON response when the provider skips the submission tool", async () => {
+    const { faux, models } = fixture();
+    faux.setResponses([fauxAssistantMessage([fauxText('```json\n{"value":"ready"}\n```')])]);
+    const service = Object.create(PiModelsService.prototype) as PiModelsService & { model: unknown; stream: unknown };
+    Object.defineProperties(service, {
+      model: { value: faux.getModel() }, stream: { value: models.streamSimple.bind(models) }, timedOutSessions: { value: new Set<string>() },
+    });
+    await expect(service.runStructuredAgent("test", "submit", "submit_result", Type.Object({ value: Type.String() }))).resolves.toEqual({ value: "ready" });
+  });
+
+  it("requests one JSON correction when a provider skips the tool and returns prose", async () => {
+    const { faux, models } = fixture();
+    faux.setResponses([
+      fauxAssistantMessage([fauxText("I completed the review")]),
+      fauxAssistantMessage([fauxText('{"value":"corrected"}')]),
+    ]);
+    const service = Object.create(PiModelsService.prototype) as PiModelsService & { model: unknown; stream: unknown };
+    Object.defineProperties(service, {
+      model: { value: faux.getModel() }, stream: { value: models.streamSimple.bind(models) }, timedOutSessions: { value: new Set<string>() },
+    });
+    await expect(service.runStructuredAgent("test", "submit", "submit_result", Type.Object({ value: Type.String() }))).resolves.toEqual({ value: "corrected" });
   });
 
   it("maps provider failure classes to distinct persisted run codes", () => {

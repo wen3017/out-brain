@@ -3,6 +3,7 @@ import { createModels, createProvider, type Model } from "@earendil-works/pi-ai"
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
+import { Check } from "typebox/value";
 import { randomUUID } from "node:crypto";
 
 @Injectable()
@@ -100,8 +101,29 @@ export class PiModelsService {
     await agent.prompt(prompt);
     if (this.consumeTimeout(sessionId)) throw new Error("PROVIDER_TIMEOUT");
     if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
-    if (submitted === undefined) throw new Error(`Agent 未调用 ${toolName}`);
-    return submitted;
+    if (submitted !== undefined && Check(parameters, submitted)) return submitted;
+    // OpenAI-compatible providers may answer with JSON instead of making the
+    // requested function call. Accept it only when the whole result matches
+    // the same tool schema; otherwise request one JSON-only correction.
+    const lastAssistant = [...agent.state.messages].reverse().find(message => message.role === "assistant");
+    const text = lastAssistant && "content" in lastAssistant && Array.isArray(lastAssistant.content)
+      ? lastAssistant.content.filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text").map(part => part.text).join("")
+      : "";
+    const direct = this.parseStructuredText(text, parameters);
+    if (direct !== undefined) return direct;
+    const json = await this.runAgentText(`${systemPrompt}\n只输出一个完整 JSON 对象，不使用 Markdown 或解释。结果必须符合以下 JSON Schema：${JSON.stringify(parameters)}`, prompt, undefined, signal);
+    const corrected = this.parseStructuredText(json, parameters);
+    if (corrected !== undefined) return corrected;
+    throw new Error(`模型未返回符合 ${toolName} 结构的结果`);
+  }
+
+  private parseStructuredText(text: string, parameters: TSchema): unknown | undefined {
+    const trimmed = text.trim();
+    const json = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)?.[1] ?? trimmed;
+    try {
+      const value: unknown = JSON.parse(json);
+      return Check(parameters, value) ? value : undefined;
+    } catch { return undefined; }
   }
 
   private timeoutMs() { const value = Number(process.env.LLM_TIMEOUT_MS ?? 180_000); return Number.isFinite(value) && value > 0 ? value : 180_000; }

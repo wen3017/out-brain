@@ -83,6 +83,11 @@ describe("agent tool exposure policy", () => {
     expect(service.wantsPresentation("按刚才要求生成三页",["我要做一份星辰项目 PPT"])) .toBe(true);
     expect(service.wantsPresentation("按刚才要求生成三页",[])).toBe(false);
   });
+  it("uses the latest PDF deck request without mixing in an older project brief", () => {
+    const history = ["开放实操题：系统要支持 PPT", "请读取论文"];
+    expect(service.presentationRequirements("基于这个 PDF 生成一份 PPT", history)).toEqual(["基于这个 PDF 生成一份 PPT"]);
+    expect(service.presentationRequirements("按刚才要求改成三页", ["做一份论文 PPT"])) .toEqual(["做一份论文 PPT", "按刚才要求改成三页"]);
+  });
   it("exposes memory without a trigger word and reads current meetings without reanalysis", async () => {
     const jobs = { analyzeMeeting: vi.fn() };
     const findMany = vi.fn(async (_args: any) => [{ title: "周会", todos: [{ owner: "张总" }] }]);
@@ -141,9 +146,12 @@ describe("presentation request parsing", () => {
       searchRun: { findMany: vi.fn(async () => []) }, meeting: { findMany: vi.fn(async () => []) },
     };
     const output = { title: "测试", slides: Array.from({ length: 8 }, (_, index) => slide(index + 1)) };
-    const models = { runStructuredAgent: vi.fn(async (_system:string,_prompt:string,tool:string) => tool==="review_presentation_facts" ? {items:presentationTextNodes(output as any).map(({key,text})=>({key,text,kind:"HEADING",evidence:""}))} : output) };
+    const models = { runStructuredAgent: vi.fn(async (_system:string,request:string,tool:string) => tool==="review_presentation_facts"
+      ? {items:(JSON.parse(request.slice(request.lastIndexOf("待审文字：\n")+"待审文字：\n".length)) as Array<{key:string;text:string}>).map(({key,text})=>({key,text,kind:"HEADING",evidence:""}))}
+      : output) };
     const service = new PresentationsService(contextDb as any, models as any, {} as any, {} as any, {} as any);
     await expect((service as any).createDocument("u", "c", "生成专业 PPT", async () => {})).resolves.toMatchObject({ slides: expect.any(Array) });
+    expect(models.runStructuredAgent.mock.calls.filter(call => call[2] === "review_presentation_facts")).toHaveLength(4);
     await expect((service as any).createDocument("u", "c", "生成十二页 PPT", async () => {})).rejects.toThrow("未满足指定的 12 页");
     output.slides = Array.from({ length: 5 }, (_, index) => slide(index + 1));
     await expect((service as any).createDocument("u", "c", "生成专业 PPT", async () => {})).rejects.toThrow("6-12 页");
@@ -155,6 +163,35 @@ describe("presentation request parsing", () => {
     service.ensureReadableLayout(document);
     const [a,b]=document.slides[0].elements;
     expect(b.text).toContain("负责人：王芳");expect(a.y+a.h).toBeLessThan(b.y);expect(b.y+b.h).toBeLessThan(7.5);expect(b.fontSize).toBeGreaterThanOrEqual(16);
+  });
+
+  it("excludes unrelated chat history when the deck is explicitly based on a PDF", async () => {
+    const db={fileAsset:{count:async()=>0},message:{findMany:async()=>[{role:"USER",content:"旧项目：AI 外脑 Demo 需求"}]},
+      documentChunk:{findMany:async()=>[{content:"Multi-UAV cooperative path planning balances efficiency and fairness.",pageStart:1,file:{originalName:"paper.pdf"}}]},
+      searchRun:{findMany:async()=>[]},meeting:{findMany:async()=>[]},documentPage:{findMany:async()=>[]}};
+    const models={runStructuredAgent:vi.fn(async(_system:string,request:string)=>{
+      expect(request).toContain("Multi-UAV cooperative path planning");
+      expect(request).not.toContain("旧项目：AI 外脑 Demo 需求");
+      throw new Error("checked prompt scope");
+    })};
+    const service=new PresentationsService(db as any,models as any,{} as any,{} as any,{} as any);
+    await expect((service as any).createDocument("u","c","基于当前 PDF 生成 1 页 PPT",async()=>{})).rejects.toThrow("checked prompt scope");
+  });
+
+  it("keeps long verified slide text in notes while fitting a short excerpt",()=>{
+    const service=Object.create(PresentationsService.prototype) as any;
+    const original="A source-backed sentence about cooperative UAV path planning. ".repeat(8);
+    const document={title:"UAV",slides:[{id:"s",title:"UAV",notes:"",elements:[{id:"e",type:"text",text:original,x:1,y:1,w:8,h:1,fontSize:20,color:"111111",bold:false}]}]};
+    service.compactSlideText(document);
+    expect(document.slides[0].elements[0].text.length).toBeLessThanOrEqual(150);
+    expect(document.slides[0].notes).toContain(original);
+  });
+  it("turns a compact model outline into an editable deck",()=>{
+    const service=Object.create(PresentationsService.prototype) as any;
+    const document=service.fromCompactPresentation({title:"多无人机路径规划",slides:[{title:"研究问题",bullets:["效率与公平性", "任务分配"]}]});
+    expect(()=>presentationSchema.parse(document)).not.toThrow();
+    expect(document.slides[0].elements.filter((element:any)=>element.type==="text")).toHaveLength(3);
+    expect(document.slides[0].elements[1].text).toContain("效率与公平性");
   });
 
   it("keeps a transient PPT failure retryable without leaking provider diagnostics", async () => {
@@ -192,8 +229,21 @@ describe("presentation request parsing", () => {
     await expect((service as any).createDocument("u","c","生成 1 页 PPT",async()=>{})).resolves.toMatchObject({title:"采购"});
     expect(reviewCount).toBe(2);
     reviewCount=0;alwaysInvalid=true;
-    await expect((service as any).createDocument("u","c","生成 1 页 PPT",async()=>{})).rejects.toThrow("原文证据");
+    const conservative = await (service as any).createDocument("u","c","生成 1 页 PPT",async()=>{});
+    expect(conservative.slides[0].elements[0].text).toContain("待确认");
     expect(reviewCount).toBe(2);
+  });
+
+  it("keeps PPT generation safe when a provider never submits the review structure",async()=>{
+    const document={title:"采购",slides:[{id:"s",title:"采购",notes:"",elements:[{id:"e",type:"text",text:"张总已审批采购",x:1,y:1,w:8,h:1,fontSize:20,color:"111111",bold:false}]}]};
+    const db={fileAsset:{count:async()=>0},message:{findMany:async()=>[]},documentChunk:{findMany:async()=>[]},searchRun:{findMany:async()=>[]},meeting:{findMany:async()=>[]},documentPage:{findMany:async()=>[]}};
+    const models={runStructuredAgent:vi.fn(async(_system:string,_prompt:string,tool:string)=>{
+      if(tool==="review_presentation_facts")throw new Error("模型未返回符合 review_presentation_facts 结构的结果");
+      return structuredClone(document);
+    })};
+    const service=new PresentationsService(db as any,models as any,{} as any,{} as any,{} as any);
+    const result=await (service as any).createDocument("u","c","生成 1 页 PPT",async()=>{});
+    expect(result.slides[0].elements[0].text).toContain("待确认");
   });
 
   it("corrects invisible text on the slide background while retaining white text on dark panels",()=>{
